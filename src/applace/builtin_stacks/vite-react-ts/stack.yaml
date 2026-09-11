@@ -1,0 +1,20 @@
+name: vite-react-ts
+title: React + TypeScript + Tailwind
+description: >
+  A single-page browser application built with Vite, React 19, TypeScript and
+  Tailwind CSS 4. It holds no server and no database: it talks to HTTP APIs that
+  already exist, through the client in src/lib/api.ts.
+runtime: node
+commands:
+  install: npm install
+  dev: npm run dev -- --port {port} --strictPort --host 127.0.0.1
+  typecheck: npm run typecheck
+  lint: npm run lint
+  build: npm run build
+manifest: package.json
+dist: dist
+env_prefix: VITE_
+entry: src/App.tsx
+deploy:
+  - local
+  - vercel

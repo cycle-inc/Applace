@@ -1,0 +1,111 @@
+"""The command line. A human's view of exactly what an agent can do."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from applace.cli import app
+from applace.db import Connection
+from applace.paths import ApplacePaths
+
+runner = CliRunner()
+Home = tuple[ApplacePaths, Connection]
+
+
+def test_init_creates_the_home_and_lists_what_it_found(paths: ApplacePaths) -> None:
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0, result.output
+    assert paths.db.exists()
+    assert paths.apps.is_dir()
+    assert "vite-react-ts" in result.output
+    assert "git" in result.output
+
+
+def test_init_is_safe_to_run_twice(paths: ApplacePaths) -> None:
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    assert runner.invoke(app, ["init"]).exit_code == 0
+
+
+def test_commands_that_need_a_home_say_so_instead_of_crashing(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import os
+
+    os.environ["APPLACE_HOME"] = str(tmp_path / "nowhere")
+    result = runner.invoke(app, ["ls"])
+    assert result.exit_code == 1
+    assert "applace init" in result.output
+
+
+def test_new_then_ls(home: Home) -> None:
+    result = runner.invoke(
+        app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "team-dashboard" in result.output
+    assert "src/main.txt" in result.output  # the entry point it told us to start at
+
+    listed = runner.invoke(app, ["ls"])
+    assert "team-dashboard" in listed.output
+    assert "clean" in listed.output
+
+
+def test_ls_says_when_an_app_has_uncommitted_work(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    (paths.app("team-dashboard") / "src" / "main.txt").write_text("edit")
+    assert "dirty" in runner.invoke(app, ["ls"]).output
+
+
+def test_ls_on_an_empty_home_is_not_an_error(home: Home) -> None:
+    result = runner.invoke(app, ["ls"])
+    assert result.exit_code == 0
+    assert "No apps yet" in result.output
+
+
+def test_new_refuses_a_bad_name_with_a_message_not_a_traceback(home: Home) -> None:
+    result = runner.invoke(app, ["new", "!!!", "--stack", "fake", "--no-install"])
+    assert result.exit_code == 1
+    assert "latin letters" in result.output
+
+
+def test_new_refuses_an_unknown_stack_and_lists_the_real_ones(home: Home) -> None:
+    result = runner.invoke(app, ["new", "App", "--stack", "nope", "--no-install"])
+    assert result.exit_code == 1
+    assert "vite-react-ts" in result.output
+
+
+def test_stacks_lists_the_builtin_and_the_installed(home: Home) -> None:
+    result = runner.invoke(app, ["stacks"])
+    assert result.exit_code == 0
+    assert "vite-react-ts" in result.output
+    assert "fake" in result.output
+
+
+def test_rm_keeps_the_repository_unless_asked(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    result = runner.invoke(app, ["rm", "team-dashboard"])
+    assert result.exit_code == 0
+    assert paths.app("team-dashboard").is_dir()
+    assert "team-dashboard" not in runner.invoke(app, ["ls"]).output
+
+
+def test_rm_delete_asks_first(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    refused = runner.invoke(app, ["rm", "team-dashboard", "--delete"], input="n\n")
+    assert refused.exit_code == 1
+    assert paths.app("team-dashboard").is_dir()
+
+    accepted = runner.invoke(app, ["rm", "team-dashboard", "--delete", "--yes"])
+    assert accepted.exit_code == 0
+    assert not paths.app("team-dashboard").exists()
+
+
+def test_rm_on_an_unknown_app_is_an_error_with_a_list(home: Home) -> None:
+    result = runner.invoke(app, ["rm", "nope"])
+    assert result.exit_code == 1
+    assert "no app called" in result.output

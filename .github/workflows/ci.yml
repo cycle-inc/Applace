@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: pytest + pyright (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --python ${{ matrix.python-version }}
+      # The npm tests run in their own job: they install a hundred packages
+      # from the registry, and a registry hiccup should not be reported as a
+      # broken build on three interpreters at once.
+      - run: uv run pytest -m 'not needs_npm'
+      - run: uv run pyright
+
+  acceptance:
+    name: against real node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -m needs_npm
+      - run: ./scripts/m1_acceptance.sh
