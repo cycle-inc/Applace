@@ -89,6 +89,18 @@ MIGRATIONS: list[str] = [
     # which happens whenever a push was refused or the machine was offline --
     # and the next successful push carries it along with the ones after it.
     "ALTER TABLE snapshots ADD COLUMN pushed_at TEXT",
+    # v5 (M6): the environment variables an app says it needs. Names and a
+    # description only -- the values live in ~/.applace/env/<slug>.env, outside
+    # both the repository and the model's context (D8). A row here with no value
+    # in that file is exactly the state "the agent asked, the human has not
+    # answered yet", which is the state an agent has to be able to report.
+    """CREATE TABLE IF NOT EXISTS env_vars (
+        app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        description TEXT,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (app_id, name)
+    )""",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -355,6 +367,36 @@ def delete_preview(conn: sqlite3.Connection, app_id: str) -> None:
 
 def claimed_ports(conn: sqlite3.Connection) -> set[int]:
     return {int(row["port"]) for row in conn.execute("SELECT port FROM previews")}
+
+
+# -- environment variables (D8) --------------------------------------------
+
+
+def declare_env(
+    conn: sqlite3.Connection, *, app_id: str, name: str, description: str | None
+) -> None:
+    """Record that an app needs a variable. Re-declaring updates the description."""
+    conn.execute(
+        """
+        INSERT INTO env_vars(app_id, name, description, created_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(app_id, name) DO UPDATE SET
+            description = COALESCE(excluded.description, env_vars.description)
+        """,
+        (app_id, name, description, now_iso()),
+    )
+
+
+def list_env(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM env_vars WHERE app_id = ? ORDER BY name", (app_id,)
+        )
+    )
+
+
+def delete_env(conn: sqlite3.Connection, app_id: str, name: str) -> None:
+    conn.execute("DELETE FROM env_vars WHERE app_id = ? AND name = ?", (app_id, name))
 
 
 def list_snapshots(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:

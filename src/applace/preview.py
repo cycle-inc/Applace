@@ -178,6 +178,7 @@ def start(
     root: Path,
     stack: Stack,
     port: int | None = None,
+    environment: dict[str, str] | None = None,
 ) -> Preview:
     """Start the app's dev server, or hand back the one already running.
 
@@ -206,7 +207,7 @@ def start(
 
     log_path = paths.app_logs(slug) / LOG_NAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    pid = _spawn(command, cwd=root, log_path=log_path)
+    pid = _spawn(command, cwd=root, log_path=log_path, environment=environment)
 
     upsert_preview(
         conn,
@@ -272,8 +273,19 @@ def tail(log_path: Path, lines: int = LOG_TAIL) -> str:
 # -- the awkward parts -----------------------------------------------------
 
 
-def _spawn(command: str, *, cwd: Path, log_path: Path) -> int:
-    """Start the dev server detached, with both streams going to its log."""
+def _spawn(
+    command: str,
+    *,
+    cwd: Path,
+    log_path: Path,
+    environment: dict[str, str] | None = None,
+) -> int:
+    """Start the dev server detached, with both streams going to its log.
+
+    ``environment`` is the app's declared variables (D8). They go into the
+    process and nowhere else -- not into the log, which a human reads, and not
+    into the repository.
+    """
     argv = shlex.split(command)
     handle = log_path.open("w", encoding="utf-8")
     try:
@@ -283,7 +295,7 @@ def _spawn(command: str, *, cwd: Path, log_path: Path) -> int:
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            env={**os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0"},
+            env={**os.environ, **(environment or {}), "NO_COLOR": "1", "FORCE_COLOR": "0"},
             # Its own session, so the whole tree can be signalled at once and so
             # a Ctrl-C in the terminal that started Applace does not reach it.
             start_new_session=True,

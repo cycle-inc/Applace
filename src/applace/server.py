@@ -14,13 +14,15 @@ from typing import Any, Iterator
 
 from mcp.server.mcpserver import Image, MCPServer
 
-from . import gate
+from . import gate, skill
 from .apps import AppError, app_detail, app_summary, create_app, require_app
+from .apps import declare_env as declare_env_for
 from .apps import screenshot as screenshot_for
 from .apps import start_preview as start_preview_for
 from .apps import stop_preview as stop_preview_for
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
+from .env import EnvError
 from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable
 from .gitrepo import GitError
 from .preview import PreviewError
@@ -43,6 +45,9 @@ is not. start_preview gives a human a URL to watch while you work, and
 screenshot_app tells you what the page actually did. Nothing you create is
 thrown away -- every green change is a commit, and when the machine has a GitHub
 organisation connected, every commit is pushed to the app's own repository.
+
+Call get_skill first. It is short, it says how to use the rest of these tools,
+and it says what this particular machine is set up to do.
 """
 
 
@@ -58,6 +63,20 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             yield conn
         finally:
             conn.close()
+
+    @server.tool()
+    def get_skill() -> dict[str, Any]:
+        """How to build an app here. Call this before anything else.
+
+        Returns `skill`, a short document written for you: the loop to follow,
+        the rules that save a round trip, what the stack already contains, and
+        how secrets work. Then it says what *this* machine does -- which stacks
+        are installed, which GitHub organisation every app lands in, and which
+        dependencies the policy allows.
+
+        Read it once per session. It is cheaper than a red build.
+        """
+        return {"ok": True, **skill.describe(home)}
 
     @server.tool()
     def list_stacks() -> dict[str, Any]:
@@ -293,6 +312,36 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             except GitError as exc:
                 return {"ok": False, "code": "git-failed", "error": str(exc)}
             return report.as_dict()
+
+    @server.tool()
+    def set_env(app: str, name: str, description: str | None = None) -> dict[str, Any]:
+        """Declare a configuration value or secret the app needs, by name.
+
+        You declare names; a human supplies the values. There is no argument
+        for the value here and no tool that returns one -- a secret must never
+        enter your context, and anything a browser bundle holds is public
+        anyway.
+
+        The response carries `instruction`: the exact command for the human to
+        run. Relay it to them and carry on. The value reaches the dev server
+        and the build without passing through you.
+
+        `exposed` false means the name does not carry the stack's prefix, so
+        the bundler will not give it to the browser -- read `warning` and
+        rename it if the page itself needs to read it.
+
+        On failure `code` is unknown-app or invalid-name.
+        """
+        with session() as conn:
+            try:
+                return {
+                    "ok": True,
+                    **declare_env_for(home, conn, app, name=name, description=description),
+                }
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except EnvError as exc:
+                return {"ok": False, "code": "invalid-name", "error": str(exc)}
 
     return server
 

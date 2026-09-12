@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M5 are shipped.** M6 is next and is not yet built.
+> **Status: M1 to M6 are shipped.** M7 is next and is not yet built.
 
 ## What v1 is
 
@@ -271,10 +271,36 @@ you**: the token goes in through an inline credential helper with the machine's
 own helper reset to empty first, because otherwise osxkeychain answers with
 whichever account it remembers and the push is refused as the wrong user.
 
-**M6 — The skill and the policy.** SKILL.md, `get_skill`, `policy.yaml` (D9 and the
-D6 exposure rules), `set_env` and the secret path (D8), and a pass with a small
-local model as Runlace did.
-*Acceptance:* a mid-sized local model builds a correct page on its first attempt.
+**M6 — The skill and the policy.** *Shipped.* SKILL.md and `get_skill`,
+`policy.yaml` (D9 and the D6 exposure rules), `set_env` and the secret path (D8),
+`applace skill`, `applace policy`, `applace env set|ls|rm`, and a pass with a
+small local model as Runlace did.
+*Acceptance:* `scripts/m6_acceptance.sh` — a denied dependency refused before
+`npm install` runs, a value the human supplies inlined into a real Vite build and
+present in nothing the agent reads, and `qwen3:8b` driven through the tools by
+`scripts/m6_local_model.py` building a correct page on its first attempt.
+
+What M6 learned. **A small model measures the harness, not itself.** Given the
+document and nothing else, qwen3:8b wrote a page that was right the first time
+and then spent ten round trips failing to ship it, because the stack's
+`noUnusedLocals` turned a leftover `import { useEffect }` and an unused
+`setReleases` into a red build. It never recovered: it resent the same file
+again and again while the page it had written would have rendered perfectly.
+So the stack was changed rather than the model — unused locals and parameters
+are a lint *warning* now, and everything that decides whether the app works
+stays an error. **The gate must refuse code that does not work, not code that is
+untidy**; tidiness costs an LLM round trips and buys a human nothing a
+tree-shaker does not already do. **The document is a component, and it drifts**:
+SKILL.md's only worked example used `useState` and `useEffect`, so the model
+reached for hooks to hold three constants — the fix was a second example with
+static data first, and a test that fails when a tool is renamed out of the
+document. **A secret is kept out of a context by having no way in**: `set_env`
+takes no value argument, no tool returns one, and the acceptance greps every
+tool result, the journal database and every committed file for the value while
+finding it inlined in `dist/` and served by the dev server. And **a policy must
+refuse before the pipeline, not inside it**: `npm install` *is* the execution of
+a dependency, so the check runs on the manifest diff in 0.02s, before anybody's
+postinstall script gets a turn.
 
 ### v2 — host it and industrialise it
 

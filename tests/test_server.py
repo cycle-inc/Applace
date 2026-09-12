@@ -22,6 +22,8 @@ from applace.server import build_server
 Home = tuple[ApplacePaths, Connection]
 
 TOOLS = {
+    "get_skill",
+    "set_env",
     "list_stacks",
     "create_app",
     "list_apps",
@@ -47,6 +49,84 @@ def test_the_server_exposes_exactly_the_tools_an_agent_needs(home: Home) -> None
     assert set(tools) == TOOLS
     # The descriptions are the interface; an empty one is a broken tool.
     assert all(tool.description for tool in tools.values())
+
+
+def test_get_skill_is_the_document_and_the_machine(home: Home) -> None:
+    """The first call an agent makes has to answer both halves of "how".
+
+    The skill says how to build; the rest of the payload says what this machine
+    does with what you build.
+    """
+    paths, _ = home
+    result = call(build_server(paths), "get_skill")
+    assert result["ok"] is True
+    assert "write_files" in result["skill"]
+    assert "fake" in [stack["name"] for stack in result["stacks"]]
+    assert result["github"] is None
+    assert result["policy"]["summary"]
+
+
+def test_set_env_declares_a_name_and_asks_a_human_for_the_value(home: Home) -> None:
+    """D8, from the agent's side: it gets an instruction, never a value."""
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Env App", stack="fake")
+
+    declared = call(
+        server, "set_env", app="env-app", name="TEST_API_URL", description="Where the API is"
+    )
+    assert declared["ok"] is True
+    assert declared["set"] is False
+    assert declared["instruction"] == "applace env set env-app TEST_API_URL"
+    assert "value" not in declared
+
+    detail = call(server, "get_app", app="env-app")
+    assert detail["env_missing"] == ["TEST_API_URL"]
+
+    # The human answers. The agent sees that, and still not the value.
+    from applace import env
+
+    env.set_value(paths, "env-app", "TEST_API_URL", "https://api.internal")
+    after = call(server, "get_app", app="env-app")
+    assert after["env"][0]["set"] is True
+    assert "https://api.internal" not in json.dumps(after)
+
+
+def test_set_env_warns_when_the_name_will_not_reach_the_browser(home: Home) -> None:
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Env App", stack="fake")
+    declared = call(server, "set_env", app="env-app", name="API_URL")
+    assert declared["exposed"] is False
+    assert "TEST_" in declared["warning"]
+
+
+def test_set_env_on_an_unknown_app_or_a_bad_name_is_a_readable_result(home: Home) -> None:
+    paths, _ = home
+    server = build_server(paths)
+    assert call(server, "set_env", app="nope", name="TEST_X")["code"] == "unknown-app"
+    call(server, "create_app", name="Env App", stack="fake")
+    assert call(server, "set_env", app="env-app", name="nope!")["code"] == "invalid-name"
+
+
+def test_a_refused_dependency_comes_back_as_a_red_write_an_agent_can_act_on(
+    home: Home,
+) -> None:
+    paths, _ = home
+    paths.policy.write_text("dependencies:\n  deny: ['left-pad']\n", encoding="utf-8")
+    server = build_server(paths)
+    call(server, "create_app", name="Policy App", stack="fake")
+
+    result = call(
+        server,
+        "write_files",
+        app="policy-app",
+        files={"manifest.json": '{"dependencies": {"left-pad": "^1.0.0"}}'},
+    )
+    assert result["ok"] is False
+    assert result["stage"] == "policy"
+    assert result["refused_deps"][0]["name"] == "left-pad"
+    assert "denylist" in result["errors"][0]["message"]
 
 
 def test_list_stacks_describes_where_to_start(home: Home) -> None:

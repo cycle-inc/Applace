@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -111,3 +112,27 @@ def test_the_builtin_template_has_no_placeholders_left_after_rendering(
     for path in target.rglob("*"):
         if path.is_file():
             assert "{{app_" not in path.read_text(encoding="utf-8"), path
+
+
+def test_the_builtin_stack_reports_untidiness_without_failing_on_it(
+    paths: ApplacePaths, tmp_path: Path
+) -> None:
+    """M6's measurement, pinned.
+
+    A leftover `import { useEffect }` made a mid-sized model's build red and it
+    never recovered, while the page it had written rendered perfectly. The gate
+    refuses code that does not work, not code that is untidy -- so unused
+    locals are a lint warning here, and the rest of TypeScript stays strict.
+    """
+    target = tmp_path / "rendered"
+    registry(paths.stacks)[DEFAULT_STACK].render(
+        target,
+        context={"app_slug": "x", "app_name": "X", "app_description": "Y"},
+    )
+    tsconfig = json.loads((target / "tsconfig.json").read_text())["compilerOptions"]
+    assert tsconfig["strict"] is True
+    assert "noUnusedLocals" not in tsconfig
+    assert "noUnusedParameters" not in tsconfig
+
+    eslint = (target / "eslint.config.js").read_text()
+    assert "'@typescript-eslint/no-unused-vars': ['warn'" in eslint

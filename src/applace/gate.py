@@ -22,12 +22,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import diagnostics, files, gitrepo, shell
+from . import diagnostics, env, files, gitrepo, policy, shell
 from .apps import INSTALL_TIMEOUT, require_app
 from .db import Connection, insert_gate, insert_snapshot, unpushed
 from .diagnostics import Diagnostic
 from .files import PathRefused
 from .paths import ApplacePaths
+from .policy import PolicyError, Refusal
 from .shell import CommandNotFound
 from .stacks import Stack, resolve
 from .sync import PushReport, push_app
@@ -69,6 +70,7 @@ class GateReport:
     written: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     new_deps: list[dict[str, str]] = field(default_factory=list)
+    refused: list[Refusal] = field(default_factory=list)
     commit: str | None = None
     committed: bool = False
     dirty: bool = False
@@ -92,6 +94,8 @@ class GateReport:
             "dirty": self.dirty,
             "duration_ms": self.duration_ms,
         }
+        if self.refused:
+            out["refused_deps"] = [refusal.as_dict() for refusal in self.refused]
         if self.push is not None:
             out["github"] = self.push.as_dict()
         return out
@@ -150,7 +154,21 @@ def write_files(
     after = files.read_dependencies(root, stack.manifest)
     report.new_deps = files.diff_dependencies(before, after)
 
-    _run_pipeline(report, root, stack, manifest_moved=before != after)
+    # D9, before the pipeline: a dependency the policy will not have is a
+    # dependency this machine must not install, and `npm install` is the moment
+    # it would run somebody's postinstall script.
+    if not _check_policy(paths, report, root, stack):
+        report.dirty = gitrepo.is_dirty(root)
+        _journal(conn, row, report, snapshot_id=None)
+        return report
+
+    _run_pipeline(
+        report,
+        root,
+        stack,
+        manifest_moved=before != after,
+        environment=env.values_for(paths, slug),
+    )
     report.duration_ms = sum(stage.duration_ms for stage in report.stages)
 
     snapshot_id: str | None = None
@@ -170,8 +188,60 @@ def write_files(
     return report
 
 
+def _check_policy(
+    paths: ApplacePaths, report: GateReport, root: Path, stack: Stack
+) -> bool:
+    """The D9 check. False means the gate is red before anything was run.
+
+    A policy file that does not parse stops the write too. A company that wrote
+    a policy and got a typo in it is better served by a loud refusal than by a
+    machine that quietly allows everything.
+    """
+    try:
+        rules = policy.load(paths)
+    except PolicyError as exc:
+        report.stage = "policy"
+        report.errors = [Diagnostic(message=str(exc), file=str(paths.policy))]
+        report.stages.append(StageRun("policy", ok=False, duration_ms=0))
+        return False
+
+    refused = rules.check(report.new_deps)
+    misconfigured = rules.check_registry_config(root)
+    if misconfigured is not None:
+        refused.append(misconfigured)
+    if refused:
+        report.stage = "policy"
+        report.refused = refused
+        report.errors = [
+            Diagnostic(
+                message=(
+                    f"{refusal.reason}. Build this with what the stack already "
+                    f"has, or ask the human to allow it in {paths.policy}."
+                ),
+                file=refusal.where or stack.manifest,
+            )
+            for refusal in refused
+        ]
+        report.stages.append(StageRun("policy", ok=False, duration_ms=0))
+        return False
+
+    if not report.new_deps:
+        report.stages.append(
+            StageRun("policy", ok=True, duration_ms=0, skipped=True,
+                     reason="the write added no dependencies")
+        )
+    else:
+        report.stages.append(StageRun("policy", ok=True, duration_ms=0))
+    return True
+
+
 def _run_pipeline(
-    report: GateReport, root: Path, stack: Stack, *, manifest_moved: bool
+    report: GateReport,
+    root: Path,
+    stack: Stack,
+    *,
+    manifest_moved: bool,
+    environment: dict[str, str] | None = None,
 ) -> None:
     """Run the stages until one fails. Fills ``report`` in place."""
     for name in PIPELINE:
@@ -193,7 +263,9 @@ def _run_pipeline(
 
         timeout = INSTALL_TIMEOUT if name == "install" else STAGE_TIMEOUT
         try:
-            result = shell.run(command, cwd=root, timeout=timeout)
+            # The build needs the app's declared variables: a bundler inlines
+            # them, so a build without them is a build of a different app (D8).
+            result = shell.run(command, cwd=root, env=environment, timeout=timeout)
         except CommandNotFound as exc:
             report.stage = name
             report.errors = [Diagnostic(message=str(exc))]

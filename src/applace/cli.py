@@ -14,11 +14,13 @@ from typing import Annotated
 
 import typer
 
-from . import gate
+from . import env as env_store
+from . import gate, policy, skill
 from .apps import (
     AppError,
     app_detail,
     create_app,
+    declare_env,
     remove_app,
     require_app,
     screenshot,
@@ -354,6 +356,146 @@ def format_gate(report: GateReport) -> str:
     return "\n".join(lines)
 
 
+@app.command("skill")
+def skill_command(
+    full: Annotated[
+        bool, typer.Option("--full/--brief", help="Print the whole document.")
+    ] = True,
+) -> None:
+    """Print what an agent is told: SKILL.md, plus what this machine does.
+
+    The same text `get_skill` returns. Read it when an agent does something you
+    did not expect -- the answer is usually that this document told it to.
+    """
+    paths = _home()
+    _require_home(paths)
+    described = skill.describe(paths)
+    if full:
+        typer.echo(described["skill"])
+    typer.echo("--- this machine ---")
+    typer.echo(f"home     {described['home']}")
+    typer.echo(
+        "stacks   " + ", ".join(stack["name"] for stack in described["stacks"])
+    )
+    connection = described["github"]
+    typer.echo(
+        f"github   {connection['org']} ({connection['visibility']})"
+        if connection
+        else "github   not connected"
+    )
+    rules = described["policy"]
+    typer.echo(f"policy   {rules.get('error') or rules['summary']}")
+
+
+@app.command("policy")
+def policy_command() -> None:
+    """What this machine allows an agent to add, and to expose (D9, D6)."""
+    paths = _home()
+    _require_home(paths)
+    try:
+        rules = policy.load(paths)
+    except policy.PolicyError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(str(rules.source) if rules.source else f"{paths.policy} (absent — defaults)")
+    typer.echo(f"  dependencies  {rules.summary()}")
+    typer.echo(f"  public repos  {rules.public_repositories}")
+    typer.echo(f"  production    {rules.production_deploys}")
+
+
+env_app = typer.Typer(
+    add_completion=False,
+    help="Values an app needs. Agents declare names; you supply values (D8).",
+    no_args_is_help=True,
+)
+app.add_typer(env_app, name="env")
+
+
+@env_app.command("set")
+def env_set(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    variable: Annotated[str, typer.Argument(help="The variable, e.g. VITE_API_BASE_URL.")],
+    value: Annotated[
+        str | None,
+        typer.Option(
+            "--value",
+            help="The value. Omit it and you are prompted without an echo, "
+            "which keeps it out of your shell history.",
+        ),
+    ] = None,
+) -> None:
+    """Give a variable its value. Nothing here is printed, logged or committed."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        slug = str(row["slug"])
+        env_store.check_name(variable)
+        secret = value if value is not None else typer.prompt(variable, hide_input=True)
+        env_store.set_value(paths, slug, variable, secret)
+        # Declared as well as set: a human may be ahead of the agent, and the
+        # agent has to be able to see that the value is already there.
+        declare_env(paths, conn, slug, name=variable)
+    except (AppError, env_store.EnvError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"{variable} set for {name}")
+    typer.echo(f"  stored in {paths.env_file(name)} (0600), never in the repository")
+    typer.echo("  restart the preview to pick it up: `applace stop` then `applace dev`")
+
+
+@env_app.command("ls")
+def env_list(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+) -> None:
+    """The variables this app declares, and which of them have a value."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        detail = app_detail(paths, conn, row)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    variables = detail.get("env") or []
+    if not variables:
+        typer.echo(f"{name} declares no variables.")
+        return
+    for variable in variables:
+        state = "set" if variable["set"] else "MISSING"
+        browser = "" if variable["exposed"] else "  (build only — no bundler prefix)"
+        typer.echo(f"  {state:<8} {variable['name']}{browser}")
+        if variable["description"]:
+            typer.echo(f"           {variable['description']}")
+
+
+@env_app.command("rm")
+def env_remove(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    variable: Annotated[str, typer.Argument(help="The variable to forget.")],
+) -> None:
+    """Remove a variable's value and its declaration."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        had_value = env_store.unset_value(paths, str(row["slug"]), variable)
+        env_store.forget(conn, app_id=str(row["id"]), name=variable)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"Removed {variable}" + ("" if had_value else " (it had no value)"))
+
+
 github_app = typer.Typer(
     add_completion=False,
     help="The GitHub connection every app follows (D2b).",
@@ -406,14 +548,29 @@ def github_connect(
         )
         raise typer.Exit(code=1)
     # D6: making code visible is the gated act. Here it is gated once, at the
-    # only moment a human is definitely present.
-    if visibility == "public" and not yes:
-        typer.confirm(
-            f"Every app Applace creates in {org} will be a PUBLIC repository, "
-            f"readable by anyone on the internet. Continue?",
-            abort=True,
-            default=False,
-        )
+    # only moment a human is definitely present -- and a company that has
+    # written a policy can take even that choice off the table (D9).
+    if visibility == "public":
+        try:
+            rule = policy.load(paths).public_repositories
+        except policy.PolicyError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+        if rule == "deny":
+            typer.secho(
+                f"{paths.policy} forbids public repositories on this machine. "
+                f"Connect with --visibility private or internal.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if rule == "confirm" and not yes:
+            typer.confirm(
+                f"Every app Applace creates in {org} will be a PUBLIC repository, "
+                f"readable by anyone on the internet. Continue?",
+                abort=True,
+                default=False,
+            )
 
     link = GitHubLink(
         org=org,

@@ -99,7 +99,7 @@ def test_the_stage_after_a_failure_is_not_run(
     paths, conn, _ = app
     _set_command(paths, "typecheck", "false")
     report = gate.write_files(paths, conn, app="gate-app", files_to_write={"a.txt": "x"})
-    assert [stage.name for stage in report.stages] == ["install", "typecheck"]
+    assert [stage.name for stage in report.stages] == ["policy", "install", "typecheck"]
 
 
 def test_a_failing_stage_comes_back_with_the_tools_own_file_and_line(
@@ -207,6 +207,71 @@ def test_a_new_dependency_is_reported_to_the_agent(
     assert report.new_deps == [
         {"name": "zod", "version": "^4.0.0", "section": "dependencies"}
     ]
+
+
+def test_a_dependency_the_policy_refuses_never_reaches_npm(
+    app: tuple[ApplacePaths, Connection, Path],
+) -> None:
+    """D9: the refusal happens before install, which is when scripts run."""
+    paths, conn, root = app
+    paths.policy.write_text("dependencies:\n  deny: ['left-pad']\n", encoding="utf-8")
+    _set_command(paths, "install", "false")  # would fail the gate if it ran
+    before = gitrepo.head(root).sha
+
+    report = gate.write_files(
+        paths,
+        conn,
+        app="gate-app",
+        files_to_write={"manifest.json": '{"dependencies": {"left-pad": "^1.0.0"}}'},
+    )
+    assert report.ok is False
+    assert report.stage == "policy"
+    assert [refusal.name for refusal in report.refused] == ["left-pad"]
+    assert "denylist" in report.errors[0].message
+    # And the agent is told what to do instead, not just told no.
+    assert "policy.yaml" in report.errors[0].message
+    assert [stage.name for stage in report.stages] == ["policy"]
+    # D4 holds: the file is still on disk and nothing was committed.
+    assert report.dirty is True
+    assert gitrepo.head(root).sha == before
+    assert report.as_dict()["refused_deps"][0]["name"] == "left-pad"
+
+
+def test_a_dependency_the_policy_allows_goes_straight_through(
+    app: tuple[ApplacePaths, Connection, Path],
+) -> None:
+    paths, conn, root = app
+    paths.policy.write_text("dependencies:\n  allow: ['zod']\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    report = gate.write_files(
+        paths,
+        conn,
+        app="gate-app",
+        files_to_write={"manifest.json": '{"dependencies": {"zod": "^4.0.0"}}'},
+    )
+    assert report.ok is True
+    policy_stage = next(stage for stage in report.stages if stage.name == "policy")
+    assert policy_stage.ok and not policy_stage.skipped
+
+
+def test_a_write_with_no_new_dependency_skips_the_policy_stage(
+    app: tuple[ApplacePaths, Connection, Path],
+) -> None:
+    paths, conn, _ = app
+    report = gate.write_files(paths, conn, app="gate-app", files_to_write={"a.txt": "x"})
+    policy_stage = next(stage for stage in report.stages if stage.name == "policy")
+    assert policy_stage.skipped and "no dependencies" in policy_stage.reason
+
+
+def test_a_broken_policy_file_stops_the_write_instead_of_allowing_everything(
+    app: tuple[ApplacePaths, Connection, Path],
+) -> None:
+    paths, conn, _ = app
+    paths.policy.write_text("dependencies: 42\n", encoding="utf-8")
+    report = gate.write_files(paths, conn, app="gate-app", files_to_write={"a.txt": "x"})
+    assert report.ok is False
+    assert report.stage == "policy"
+    assert "must be a mapping" in report.errors[0].message
 
 
 def test_every_pass_is_journaled_green_or_red(

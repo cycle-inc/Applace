@@ -25,13 +25,14 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M5 are shipped**: the store (apps as git repositories), the compiler
+**M1 to M6 are shipped**: the store (apps as git repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
-real browser, its console and its failed requests), and GitHub (every new app is
-a repository in your organisation, and every green snapshot is pushed there).
-The skill and deployment are specified in [SPEC.md](SPEC.md) and not yet built.
-The milestone list there is the roadmap, and it is followed in order.
+real browser, its console and its failed requests), GitHub (every new app is a
+repository in your organisation, and every green snapshot is pushed there), and
+the skill (the document an agent reads, the dependency policy, and the secret
+path). Deployment is specified in [SPEC.md](SPEC.md) and not yet built. The
+milestone list there is the roadmap, and it is followed in order.
 
 ### Try it
 
@@ -81,6 +82,40 @@ uv run applace github adopt team-dashboard --repo acme/dash   # an existing repo
 If someone else pushed first, the push is refused and says where the remote is:
 Applace never force-pushes. Rebase the app, then `applace push` again.
 
+### Secrets and configuration
+
+An agent declares **names**; you supply **values**. There is no tool argument
+for a value and no tool that returns one, so a secret never enters a model's
+context.
+
+```bash
+uv run applace env set team-dashboard VITE_API_BASE_URL   # prompts, no echo
+uv run applace env ls team-dashboard
+```
+
+Values live in `~/.applace/env/<app>.env`, `0600`, outside every repository, and
+are injected into the dev server and the build — never written into the app.
+
+### The policy
+
+`~/.applace/policy.yaml` is what this machine allows. It is checked *before*
+`npm install` runs, because installing a package is running it.
+
+```yaml
+dependencies:
+  allow: [react, react-dom, recharts]   # an allowlist, if you want one
+  deny: ["@acme/legacy-ui"]
+  registry: https://npm.acme.internal
+exposure:
+  public_repositories: deny             # allow | confirm | deny
+  production_deploys: confirm
+```
+
+```bash
+uv run applace policy       # what is in force
+uv run applace skill        # what an agent is told, and what this machine is
+```
+
 ### As an MCP server
 
 ```bash
@@ -88,8 +123,10 @@ uv run applace serve            # stdio
 uv run applace serve --http 8848
 ```
 
-Tools available today: `list_stacks`, `create_app`, `list_apps`, `get_app`,
-`read_files`, `write_files`, `start_preview`, `stop_preview`, `screenshot_app`.
+Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
+`get_app`, `read_files`, `write_files`, `set_env`, `start_preview`,
+`stop_preview`, `screenshot_app`. `get_skill` is the one to call first: it
+returns the skill document plus what this particular machine does.
 
 ### Design
 

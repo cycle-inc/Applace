@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import eyes, github, gitrepo, preview, shell
+from . import env, eyes, github, gitrepo, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
@@ -272,7 +272,65 @@ def app_detail(
         detail["entry"] = stack.entry
         detail["env_prefix"] = stack.env_prefix
         detail["deploy"] = list(stack.deploy)
+    # Names and whether a human has answered, never a value (D8).
+    declared = env.declarations(
+        conn,
+        paths,
+        app_id=str(row["id"]),
+        slug=str(row["slug"]),
+        prefix=stack.env_prefix if stack is not None else "",
+    )
+    detail["env"] = [variable.as_dict() for variable in declared]
+    detail["env_missing"] = [variable.name for variable in env.missing(declared)]
     return detail
+
+
+def declare_env(
+    paths: ApplacePaths,
+    conn: Connection,
+    key: str,
+    *,
+    name: str,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """`set_env`: record that an app needs a variable, and say who supplies it.
+
+    Returns the state of that variable and the command a human runs to give it
+    a value. The value is not an argument here and never will be (D8).
+    """
+    row = require_app(conn, key)
+    slug = str(row["slug"])
+    env.declare(conn, app_id=str(row["id"]), name=name, description=description)
+    try:
+        stack = resolve(paths.stacks, str(row["stack"]))
+        prefix = stack.env_prefix
+    except Exception:  # the stack was uninstalled; the declaration still stands
+        prefix = ""
+    variables = {
+        variable.name: variable
+        for variable in env.declarations(
+            conn, paths, app_id=str(row["id"]), slug=slug, prefix=prefix
+        )
+    }
+    variable = variables[name]
+    out: dict[str, Any] = {
+        "app": slug,
+        **variable.as_dict(),
+        "instruction": env.instruction(slug, name),
+    }
+    if not variable.has_value:
+        out["note"] = (
+            f"{name} has no value yet. Ask the human to run "
+            f"`{env.instruction(slug, name)}`; you will never see the value, and "
+            f"the app will have it in the preview and in the build."
+        )
+    if not variable.exposed:
+        out["warning"] = (
+            f"{name} does not start with {prefix!r}, so this stack's bundler will "
+            f"not expose it to the browser. Name it {prefix}{name} if the page "
+            f"itself has to read it."
+        )
+    return out
 
 
 def outstanding(conn: Connection, app_id: str) -> dict[str, Any]:
@@ -296,14 +354,18 @@ def start_preview(
 ) -> preview.Preview:
     """Run the app's dev server, or hand back the one already running."""
     row = require_app(conn, key)
+    slug = str(row["slug"])
     return preview.start(
         paths,
         conn,
         app_id=str(row["id"]),
-        slug=str(row["slug"]),
+        slug=slug,
         root=Path(str(row["path"])),
         stack=resolve(paths.stacks, str(row["stack"])),
         port=port,
+        # The dev server is where a value is actually needed (D8): it goes into
+        # the process, not into a file in the repository and not into a report.
+        environment=env.values_for(paths, slug),
     )
 
 

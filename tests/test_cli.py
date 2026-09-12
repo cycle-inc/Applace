@@ -288,6 +288,101 @@ def test_init_reports_the_browser_as_optional(paths: ApplacePaths) -> None:
     assert report.ready is True
 
 
+def test_skill_prints_the_document_and_what_this_machine_does(home: Home) -> None:
+    result = runner.invoke(app, ["skill"])
+    assert result.exit_code == 0, result.output
+    assert "write_files is a compiler" in result.output or "compiler" in result.output
+    assert "--- this machine ---" in result.output
+    assert "github   not connected" in result.output
+
+    brief = runner.invoke(app, ["skill", "--brief"])
+    assert "name: applace" not in brief.output
+    assert "--- this machine ---" in brief.output
+
+
+def test_policy_shows_the_defaults_and_then_the_file(home: Home) -> None:
+    paths, _ = home
+    default = runner.invoke(app, ["policy"])
+    assert default.exit_code == 0, default.output
+    assert "absent" in default.output
+    assert "public repos  confirm" in default.output
+
+    paths.policy.write_text("dependencies:\n  deny: ['left-pad']\n", encoding="utf-8")
+    tightened = runner.invoke(app, ["policy"])
+    assert "left-pad may not be added" in tightened.output
+
+
+def test_a_broken_policy_file_is_reported_not_ignored(home: Home) -> None:
+    paths, _ = home
+    paths.policy.write_text("dependencies: 42\n", encoding="utf-8")
+    result = runner.invoke(app, ["policy"])
+    assert result.exit_code == 1
+    assert "must be a mapping" in result.output
+
+
+def test_a_policy_can_take_public_repositories_off_the_table(home: Home) -> None:
+    """D6 says ask a human; D9 lets a company say the answer is always no."""
+    paths, _ = home
+    paths.policy.write_text("exposure:\n  public_repositories: deny\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["github", "connect", "--org", "acme", "--visibility", "public", "--yes"]
+    )
+    assert result.exit_code == 1
+    assert "forbids public repositories" in result.output
+    assert github.load(applace_paths()) is None
+
+
+def test_env_set_stores_a_value_without_printing_it(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Env App", "--stack", "fake", "--no-install"])
+
+    typed = runner.invoke(
+        app, ["env", "set", "env-app", "TEST_TOKEN"], input="sk-secret-value\n"
+    )
+    assert typed.exit_code == 0, typed.output
+    assert "sk-secret-value" not in typed.output
+    assert "TEST_TOKEN set for env-app" in typed.output
+    assert "sk-secret-value" in paths.env_file("env-app").read_text(encoding="utf-8")
+
+    listed = runner.invoke(app, ["env", "ls", "env-app"])
+    assert "set      TEST_TOKEN" in listed.output
+    assert "sk-secret-value" not in listed.output
+
+
+def test_env_ls_says_which_variables_are_still_missing(home: Home) -> None:
+    paths, conn = home
+    runner.invoke(app, ["new", "Env App", "--stack", "fake", "--no-install"])
+    from applace.apps import declare_env
+
+    declare_env(paths, conn, "env-app", name="TEST_API_URL", description="Where the API is")
+    declare_env(paths, conn, "env-app", name="SERVER_ONLY")
+
+    listed = runner.invoke(app, ["env", "ls", "env-app"])
+    assert "MISSING  TEST_API_URL" in listed.output
+    assert "Where the API is" in listed.output
+    assert "build only" in listed.output  # SERVER_ONLY has no TEST_ prefix
+
+
+def test_env_rm_forgets_the_value_and_the_declaration(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Env App", "--stack", "fake", "--no-install"])
+    runner.invoke(app, ["env", "set", "env-app", "TEST_TOKEN", "--value", "x"])
+
+    removed = runner.invoke(app, ["env", "rm", "env-app", "TEST_TOKEN"])
+    assert removed.exit_code == 0, removed.output
+    assert "TEST_TOKEN" not in paths.env_file("env-app").read_text(encoding="utf-8")
+    assert runner.invoke(app, ["env", "ls", "env-app"]).output.strip().endswith(
+        "declares no variables."
+    )
+
+
+def test_env_set_refuses_a_name_that_is_not_a_variable_name(home: Home) -> None:
+    runner.invoke(app, ["new", "Env App", "--stack", "fake", "--no-install"])
+    result = runner.invoke(app, ["env", "set", "env-app", "my key", "--value", "x"])
+    assert result.exit_code == 1
+    assert "usable variable name" in result.output
+
+
 def test_check_exits_nonzero_and_prints_the_errors_when_red(home: Home) -> None:
     import yaml
 
