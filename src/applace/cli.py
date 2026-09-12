@@ -13,8 +13,10 @@ from typing import Annotated
 
 import typer
 
+from . import gate
 from .apps import AppError, app_detail, create_app, remove_app, require_app
 from .db import connect, list_apps
+from .gate import GateReport
 from .init_cmd import InitReport, run_init
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
@@ -162,6 +164,63 @@ def list_command() -> None:
             )
     finally:
         conn.close()
+
+
+@app.command()
+def check(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    message: Annotated[
+        str | None,
+        typer.Option("--message", "-m", help="Commit subject, if this passes."),
+    ] = None,
+) -> None:
+    """Take an app through the gate: typecheck, lint, build, and commit if green.
+
+    The same pipeline an agent's write goes through, so a human can reproduce
+    exactly what the agent was told.
+    """
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        report = gate.write_files(paths, conn, app=name, message=message)
+    except (AppError, StackError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_gate(report))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+def format_gate(report: GateReport) -> str:
+    lines: list[str] = []
+    for stage in report.stages:
+        if stage.skipped:
+            lines.append(f"  skip  {stage.name:<10} ({stage.reason})")
+        else:
+            mark = "ok  " if stage.ok else "FAIL"
+            lines.append(f"  {mark}  {stage.name:<10} {stage.duration_ms} ms")
+    if report.new_deps:
+        names = ", ".join(f"{d['name']}@{d['version']}" for d in report.new_deps)
+        lines += ["", f"New dependencies: {names}"]
+    if report.ok:
+        tail = (
+            f"green — committed {report.commit[:12]}"
+            if report.committed and report.commit
+            else "green — nothing had changed, so there is nothing to commit"
+        )
+        lines += ["", tail]
+        return "\n".join(lines)
+    lines += ["", f"red at {report.stage} — nothing was committed"]
+    for error in report.errors:
+        where = error.file or ""
+        if error.line is not None:
+            where = f"{where}:{error.line}:{error.column}"
+        code = f" [{error.code}]" if error.code else ""
+        lines.append(f"  {where}{code} {error.message}" if where else f"  {error.message}{code}")
+    return "\n".join(lines)
 
 
 @app.command()

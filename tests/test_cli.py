@@ -109,3 +109,34 @@ def test_rm_on_an_unknown_app_is_an_error_with_a_list(home: Home) -> None:
     result = runner.invoke(app, ["rm", "nope"])
     assert result.exit_code == 1
     assert "no app called" in result.output
+
+
+def test_check_runs_the_gate_and_commits_a_hand_edit(home: Home) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Gate App", "--stack", "fake", "--no-install"])
+    (paths.app("gate-app") / "src" / "byhand.txt").write_text("hi\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", "gate-app", "-m", "Keep the hand edit"])
+    assert result.exit_code == 0, result.output
+    assert "green" in result.output
+    assert "committed" in result.output
+
+
+def test_check_exits_nonzero_and_prints_the_errors_when_red(home: Home) -> None:
+    import yaml
+
+    paths, _ = home
+    runner.invoke(app, ["new", "Gate App", "--stack", "fake", "--no-install"])
+    manifest = paths.stacks / "fake" / "stack.yaml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["commands"]["typecheck"] = (
+        "sh -c 'echo \"src/a.ts(2,3): error TS1005: nope.\"; exit 1'"
+    )
+    manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+    (paths.app("gate-app") / "src" / "byhand.txt").write_text("hi\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", "gate-app"])
+    assert result.exit_code == 1
+    assert "red at typecheck" in result.output
+    assert "src/a.ts:2:3" in result.output
+    assert "TS1005" in result.output

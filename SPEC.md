@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 is shipped.** M2 is next and is not yet built.
+> **Status: M1 and M2 are shipped.** M3 is next and is not yet built.
 
 ## What v1 is
 
@@ -189,11 +189,22 @@ preview in its own group. And **a failed `install` does not destroy the app**:
 the source is valid and committed, and deleting a developer's work because npm
 could not reach the registry would be the wrong call.
 
-**M2 — The compiler.** `read_files`, `write_files`, the D3 pipeline, real tool
-output parsed to `{file, line, column, message}`, green/dirty per D4, `new_deps`
-reported, a commit on every green gate.
-*Acceptance:* write a type error, get the compiler's own message and line; fix it,
-get a commit.
+**M2 — The compiler.** *Shipped.* `read_files`, `write_files`, the D3 pipeline,
+real tool output parsed to `{file, line, column, message}`, green/dirty per D4,
+`new_deps` reported, a commit on every green gate, and `applace check` so a human
+runs the identical pipeline.
+*Acceptance:* `scripts/m2_acceptance.sh` — write a type error, get the compiler's
+own message and line; fix it, get a commit.
+
+What M2 learned. **Parsers must be written against captured output, never
+against documentation**: vite 8 is rolldown, whose errors are `[CODE] message`
+over a box-drawn frame and nothing like the esbuild format the docs describe,
+and it colours its output after being told not to. **The install stage has to be
+conditional** — `npm install` on an unchanged manifest is tens of seconds
+between the agent and every edit — so the manifest's dependency sections are
+read before and after the write, which is also where `new_deps` comes from.
+And **the path lint runs on the whole batch before anything is written**, so a
+refusal leaves the app byte-for-byte as it was.
 
 **M3 — The preview.** The dev-server supervisor: port allocation, start, stop,
 idempotence, log capture, and recovery of a preview whose supervisor was restarted.

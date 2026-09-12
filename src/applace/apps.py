@@ -8,6 +8,7 @@ is bookkeeping; the repository is the truth, and every question about the app's
 
 from __future__ import annotations
 
+import json
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gitrepo, shell
-from .db import Connection, find_app, insert_app, insert_snapshot, latest_snapshot
+from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots
 from .naming import display_name, slugify
@@ -212,11 +213,28 @@ def app_detail(
     detail["uncommitted"] = gitrepo.status(path)
     detail["snapshots"] = len(list_snapshots(conn, str(row["id"])))
     detail["installed"] = (path / "node_modules").is_dir()
+    detail.update(outstanding(conn, str(row["id"])))
     if stack is not None:
         detail["entry"] = stack.entry
         detail["env_prefix"] = stack.env_prefix
         detail["deploy"] = list(stack.deploy)
     return detail
+
+
+def outstanding(conn: Connection, app_id: str) -> dict[str, Any]:
+    """The errors the last gate left behind, if it left any (D4).
+
+    An app is dirty either because the agent wrote something that did not pass
+    or because a human edited the repository. Only the first of those has
+    errors attached, and saying which one it is saves the agent a guess.
+    """
+    gate = latest_gate(conn, app_id)
+    if gate is None or bool(gate["ok"]):
+        return {"errors": []}
+    return {
+        "errors": json.loads(str(gate["errors_json"] or "[]")),
+        "failed_stage": str(gate["stage"]),
+    }
 
 
 def remove_app(

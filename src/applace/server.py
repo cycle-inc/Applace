@@ -14,9 +14,11 @@ from typing import Any, Iterator
 
 from mcp.server.mcpserver import MCPServer
 
+from . import gate
 from .apps import AppError, app_detail, app_summary, create_app, require_app
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
+from .gitrepo import GitError
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as default_paths
 from .stacks import StackError, registry
@@ -28,7 +30,11 @@ Applace builds and hosts web apps. An app here is an ordinary git repository
 that you never touch directly: ask for it and Applace renders it, installs it,
 type-checks it, builds it and commits it. Call list_stacks to see what an app
 can be made of, create_app to make one, get_app to read its state and file
-tree. Nothing you create is thrown away -- every green change is a commit.
+tree, read_files and write_files to change it.
+
+write_files is a compiler: every write is type-checked, linted and built before
+it is kept, and you get the real tool's errors back with file and line when it
+is not. Nothing you create is thrown away -- every green change is a commit.
 """
 
 
@@ -125,6 +131,67 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             except AppError as exc:
                 return {"ok": False, "code": "unknown-app", "error": str(exc)}
             return {"ok": True, **app_detail(home, conn, row)}
+
+    @server.tool()
+    def read_files(app: str, paths: list[str]) -> dict[str, Any]:
+        """Read the app's source, by repository-relative path.
+
+        Ask for the files you are about to change, all in one call. Each entry
+        comes back with `content`, or with `error` when that one path could not
+        be read -- the rest of the batch still arrives.
+
+        On failure `code` is unknown-app.
+        """
+        with session() as conn:
+            try:
+                return {"ok": True, **gate.read(home, conn, app=app, paths_to_read=paths)}
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+
+    # Sync for the same reason create_app is: this runs a build.
+    @server.tool()
+    def write_files(
+        app: str,
+        files: dict[str, str] | None = None,
+        delete: list[str] | None = None,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        """Write source into an app, then type-check, lint and build it.
+
+        This is the only way to change an app, and it is a compiler, not a file
+        writer. Pass whole files in `files` as {path: content} -- a path that
+        does not exist yet is created. `message` is the commit subject.
+
+        When `ok` is true the app built and the change is committed; `commit` is
+        the new sha. When `ok` is false nothing was committed, your files are
+        still on disk, and `stage` says which step failed -- read `errors`, each
+        of which carries the file, line and column the real tool reported, fix
+        them, and call this again.
+
+        `new_deps` lists dependencies your change added: adding one costs an
+        install, so prefer what the stack already has.
+
+        Call this with no `files` to re-check an app that is already dirty.
+
+        On failure `code` is unknown-app or unknown-stack.
+        """
+        with session() as conn:
+            try:
+                report = gate.write_files(
+                    home,
+                    conn,
+                    app=app,
+                    files_to_write=files,
+                    delete=delete,
+                    message=message,
+                )
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except StackError as exc:
+                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
+            except GitError as exc:
+                return {"ok": False, "code": "git-failed", "error": str(exc)}
+            return report.as_dict()
 
     return server
 

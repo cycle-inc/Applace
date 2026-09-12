@@ -20,7 +20,14 @@ from applace.server import build_server
 
 Home = tuple[ApplacePaths, Connection]
 
-M1_TOOLS = {"list_stacks", "create_app", "list_apps", "get_app"}
+TOOLS = {
+    "list_stacks",
+    "create_app",
+    "list_apps",
+    "get_app",
+    "read_files",
+    "write_files",
+}
 
 
 def call(server: MCPServer, tool: str, /, **arguments: Any) -> dict[str, Any]:
@@ -36,10 +43,10 @@ def tools_of(server: MCPServer) -> dict[str, Any]:
     return {t.name: t for t in asyncio.run(server.list_tools())}
 
 
-def test_the_server_exposes_the_four_m1_tools(home: Home) -> None:
+def test_the_server_exposes_exactly_the_tools_an_agent_needs(home: Home) -> None:
     paths, _ = home
     tools = tools_of(build_server(paths))
-    assert set(tools) == M1_TOOLS
+    assert set(tools) == TOOLS
     # The descriptions are the interface; an empty one is a broken tool.
     assert all(tool.description for tool in tools.values())
 
@@ -120,3 +127,40 @@ def test_get_app_on_an_unknown_app_is_a_readable_result(home: Home) -> None:
 def test_list_apps_on_an_empty_home(home: Home) -> None:
     paths, _ = home
     assert call(build_server(paths), "list_apps") == {"ok": True, "apps": []}
+
+
+def test_read_files_returns_source_and_names_what_it_could_not_read(home: Home) -> None:
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+
+    result = call(
+        server, "read_files", app="team-dashboard", paths=["src/main.txt", ".git/config"]
+    )
+    assert "Team Dashboard" in result["files"][0]["content"]
+    assert "Applace manages" in result["files"][1]["error"]
+
+
+def test_write_files_builds_commits_and_says_what_it_committed(home: Home) -> None:
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+
+    result = call(
+        server,
+        "write_files",
+        app="team-dashboard",
+        files={"src/page.txt": "a page\n"},
+        message="Add a page",
+    )
+    assert result["ok"] is True
+    assert result["written"] == ["src/page.txt"]
+    assert result["committed"] is True
+    assert call(server, "get_app", app="team-dashboard")["commit"] == result["commit"]
+
+
+def test_write_files_on_an_unknown_app_is_a_readable_result(home: Home) -> None:
+    paths, _ = home
+    result = call(build_server(paths), "write_files", app="nope", files={"a.txt": "x"})
+    assert result["ok"] is False
+    assert result["code"] == "unknown-app"

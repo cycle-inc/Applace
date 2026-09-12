@@ -55,7 +55,24 @@ CREATE TABLE IF NOT EXISTS snapshots (
 # SCHEMA above is version 1. Every change since is a statement here, applied in
 # order to whatever version a database is already at. Only additive changes
 # belong in this list: an Applace home is the user's data.
-MIGRATIONS: list[str] = []
+MIGRATIONS: list[str] = [
+    # v2 (M2): one row per write_files, green or red. This is the answer to
+    # "why is this app dirty" and to "what did the agent try before it worked",
+    # so a failed gate is journaled exactly as carefully as a successful one.
+    # `snapshot_id` is NULL for a red gate -- there is no commit to point at.
+    """CREATE TABLE IF NOT EXISTS gates (
+        id          TEXT PRIMARY KEY,
+        app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        snapshot_id TEXT REFERENCES snapshots(id) ON DELETE SET NULL,
+        stage       TEXT NOT NULL,        -- where it stopped, or 'build' when it passed
+        ok          INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        errors_json TEXT,
+        new_deps_json TEXT,
+        written_json  TEXT,
+        created_at  TEXT NOT NULL
+    )""",
+]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
 
@@ -173,6 +190,52 @@ def insert_snapshot(
         """,
         (snapshot_id, app_id, commit_sha, message, now_iso()),
     )
+
+
+def insert_gate(
+    conn: sqlite3.Connection,
+    *,
+    gate_id: str,
+    app_id: str,
+    snapshot_id: str | None,
+    stage: str,
+    ok: bool,
+    duration_ms: int,
+    errors: list[dict[str, Any]],
+    new_deps: list[dict[str, Any]],
+    written: list[str],
+) -> None:
+    """Journal one pass of the compiler, whichever way it went."""
+    conn.execute(
+        """
+        INSERT INTO gates(id, app_id, snapshot_id, stage, ok, duration_ms,
+                          errors_json, new_deps_json, written_json, created_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            gate_id,
+            app_id,
+            snapshot_id,
+            stage,
+            int(ok),
+            duration_ms,
+            canonical_json(errors),
+            canonical_json(new_deps),
+            canonical_json(written),
+            now_iso(),
+        ),
+    )
+
+
+def latest_gate(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None:
+    """The last thing the compiler said about this app.
+
+    Ordered by rowid: two gates on a fast machine land in the same second.
+    """
+    return conn.execute(
+        "SELECT * FROM gates WHERE app_id = ? ORDER BY rowid DESC LIMIT 1",
+        (app_id,),
+    ).fetchone()
 
 
 def latest_snapshot(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None:

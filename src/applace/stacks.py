@@ -49,6 +49,9 @@ class Stack:
     root: Path
     manifest: str = "package.json"
     dist: str = "dist"
+    # Where `install` puts what it downloads. Its absence is how the compiler
+    # knows an app has never been installed; a non-node stack names its own.
+    modules: str = "node_modules"
     env_prefix: str = ""
     entry: str = ""
     deploy: list[str] = field(default_factory=list)
@@ -153,6 +156,7 @@ def load(root: Path, *, source: str = BUILTIN, commit: str | None = None) -> Sta
         root=root,
         manifest=str(raw.get("manifest") or "package.json"),
         dist=str(raw.get("dist") or "dist"),
+        modules=str(raw.get("modules") or "node_modules"),
         env_prefix=str(raw.get("env_prefix") or ""),
         entry=str(raw.get("entry") or ""),
         deploy=[str(d) for d in deploy_raw],
