@@ -72,6 +72,10 @@ class Stack:
             "env_prefix": self.env_prefix,
             "deploy": list(self.deploy),
             "source": self.source,
+            # The commit a company stack is pinned at. An agent does not act on
+            # it, but it is what makes "which version of our design system is
+            # this app built on" answerable months later.
+            "commit": self.commit,
         }
 
     def render(self, target: Path, *, context: dict[str, str]) -> list[str]:
@@ -117,8 +121,20 @@ def _is_text(path: Path) -> bool:
     return True
 
 
-def load(root: Path, *, source: str = BUILTIN, commit: str | None = None) -> Stack:
-    """Read one stack directory, refusing anything a later stage would trip over."""
+def load(
+    root: Path,
+    *,
+    source: str = BUILTIN,
+    commit: str | None = None,
+    name: str | None = None,
+) -> Stack:
+    """Read one stack directory, refusing anything a later stage would trip over.
+
+    ``name`` overrides what ``stack.yaml`` calls itself, which is how a stack
+    installed under a chosen directory name is known by that name: two forks of
+    the same company stack both say ``name: acme-web`` inside, and the directory
+    is the only place a human can tell them apart.
+    """
     manifest_path = root / "stack.yaml"
     if not manifest_path.is_file():
         raise StackError(f"{root} has no stack.yaml")
@@ -129,27 +145,27 @@ def load(root: Path, *, source: str = BUILTIN, commit: str | None = None) -> Sta
     if not isinstance(raw, dict):
         raise StackError(f"{manifest_path} must be a mapping")
 
-    name = str(raw.get("name") or root.name)
+    stack_name = str(name or raw.get("name") or root.name)
     commands_raw = raw.get("commands")
     if not isinstance(commands_raw, dict):
-        raise StackError(f"stack {name!r} declares no commands")
+        raise StackError(f"stack {stack_name!r} declares no commands")
     commands = {str(k): str(v) for k, v in commands_raw.items() if v}
     unknown = sorted(set(commands) - set(COMMANDS))
     if unknown:
         raise StackError(
-            f"stack {name!r} declares unknown command(s) {', '.join(unknown)}; "
+            f"stack {stack_name!r} declares unknown command(s) {', '.join(unknown)}; "
             f"known commands are {', '.join(COMMANDS)}"
         )
     missing = [c for c in REQUIRED_COMMANDS if c not in commands]
     if missing:
         raise StackError(
-            f"stack {name!r} is missing required command(s) {', '.join(missing)}"
+            f"stack {stack_name!r} is missing required command(s) {', '.join(missing)}"
         )
 
     deploy_raw = raw.get("deploy") or []
     return Stack(
-        name=name,
-        title=str(raw.get("title") or name),
+        name=stack_name,
+        title=str(raw.get("title") or stack_name),
         description=" ".join(str(raw.get("description") or "").split()),
         runtime=str(raw.get("runtime") or "node"),
         commands=commands,
@@ -186,7 +202,7 @@ def registry(installed_root: Path | None) -> dict[str, Stack]:
                     source = str(data.get("source") or root.name)
                     commit = data.get("commit")
                     commit = str(commit) if commit else None
-            stack = load(root, source=source, commit=commit)
+            stack = load(root, source=source, commit=commit, name=root.name)
             stacks[stack.name] = stack
     return stacks
 

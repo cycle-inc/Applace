@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+
+# Secret values never enter the repository (D8). Applace keeps them in
+# ~/.applace/env/ and injects them into the dev server and the deploy target.
+.env
+.env.*
+!.env.example

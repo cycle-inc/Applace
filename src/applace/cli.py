@@ -48,7 +48,12 @@ from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
 from .preview import tail as preview_tail
 from .server import serve as serve_server
-from .stacks import StackError, registry
+from .stacks import StackError
+from .stackstore import add as add_stack
+from .stackstore import describe as describe_stacks
+from .stackstore import drift as stack_drift
+from .stackstore import remove as remove_stack
+from .stackstore import update as update_stack
 from .sync import adopt_app, push_app
 from .vercel import VercelError, VercelLink
 from .vercel import api as vercel_api
@@ -926,19 +931,131 @@ def logs(
     typer.echo(preview_tail(log, lines))
 
 
-@app.command()
-def stacks() -> None:
-    """The stacks an app can be built from."""
+stacks_app = typer.Typer(
+    help="The stacks apps are built from, and the company's own.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(stacks_app, name="stacks")
+
+
+@stacks_app.callback()
+def stacks_root(context: typer.Context) -> None:
+    """List the stacks an app can be built from. Subcommands manage them."""
+    if context.invoked_subcommand is not None:
+        return
     paths = _home()
     try:
-        available = registry(paths.stacks)
+        entries = describe_stacks(paths)
     except StackError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
-    for stack in available.values():
-        source = "" if stack.source == "builtin" else f"  ({stack.source})"
-        typer.echo(f"{stack.name:<20} {stack.title}{source}")
-        typer.echo(f"{'':<20} {stack.description}")
+    for entry in entries:
+        origin = "built in" if entry["builtin"] else str(entry["source"])
+        typer.echo(f"{entry['name']:<20} {entry['title']}  ({origin})")
+        typer.echo(f"{'':<20} {entry['description']}")
+        if entry["commit"]:
+            pinned = f"{'':<20} pinned at {str(entry['commit'])[:12]}"
+            if entry.get("ref") and entry["ref"] != "HEAD":
+                pinned += f" on {entry['ref']}"
+            typer.echo(pinned)
+
+
+@stacks_app.command("add")
+def stacks_add(
+    url: Annotated[str, typer.Argument(help="The stack repository, as git would clone it.")],
+    name: Annotated[
+        str | None, typer.Option("--name", help="Install it under this name instead.")
+    ] = None,
+    ref: Annotated[
+        str | None, typer.Option("--ref", help="A branch or tag, rather than the default one.")
+    ] = None,
+    path: Annotated[
+        str | None,
+        typer.Option("--path", help="The stack's directory inside the repository."),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Replace a stack of the same name.")
+    ] = False,
+) -> None:
+    """Install a company stack from git, pinned to the commit it was cloned at."""
+    paths = _home()
+    _require_home(paths)
+    try:
+        installed = add_stack(paths, url, name=name, ref=ref, subdir=path, force=force)
+    except StackError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Installed {installed.name} ({installed.title})")
+    typer.echo(f"  from    {installed.source} at {installed.commit[:12]}")
+    typer.echo(f"  in      {installed.path}")
+    typer.echo(f"  new     applace new \"My App\" --stack {installed.name}")
+
+
+@stacks_app.command("update")
+def stacks_update(
+    name: Annotated[str, typer.Argument(help="The installed stack's name.")],
+) -> None:
+    """Move an installed stack to the newest commit of the ref it came from."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        installed = update_stack(paths, name)
+        drifted = [entry for entry in stack_drift(conn, paths) if entry["stack"] == name]
+    except StackError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if not installed.changed:
+        typer.echo(f"{name} is already at {installed.commit[:12]}")
+        return
+    previous = (installed.previous or "")[:12] or "an unrecorded commit"
+    typer.echo(f"Updated {name}: {previous} → {installed.commit[:12]}")
+    for entry in drifted:
+        typer.echo(
+            f"  {entry['app']} was built from {str(entry['born_at'])[:12]} and "
+            f"stays there; new apps get {str(entry['stack_at'])[:12]}."
+        )
+
+
+@stacks_app.command("rm")
+def stacks_remove(
+    name: Annotated[str, typer.Argument(help="The installed stack's name.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
+) -> None:
+    """Uninstall a company stack. The apps built from it are repositories and stay."""
+    paths = _home()
+    _require_home(paths)
+    if not yes:
+        typer.confirm(f"Uninstall the stack {name}?", abort=True, default=False)
+    try:
+        root = remove_stack(paths, name)
+    except StackError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Removed {root}")
+
+
+@stacks_app.command("drift")
+def stacks_drift() -> None:
+    """Which apps were born from a stack commit that is no longer installed."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        drifted = stack_drift(conn, paths)
+    finally:
+        conn.close()
+    if not drifted:
+        typer.echo("Every app is on the stack commit that is installed now.")
+        return
+    for entry in drifted:
+        typer.echo(
+            f"{entry['app']:<24} {entry['stack']:<16} "
+            f"born {str(entry['born_at'])[:12]}  now {str(entry['stack_at'])[:12]}"
+        )
 
 
 @app.command("rm")

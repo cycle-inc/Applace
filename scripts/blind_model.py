@@ -40,21 +40,37 @@ from mcp.types import TextContent
 from applace.paths import ApplacePaths, applace_home
 from applace.server import build_server
 
-# base URL, key variable, and dollars per million tokens (prompt, completion).
 PROVIDERS: dict[str, dict[str, Any]] = {
     "mistral": {
         "base": "https://api.mistral.ai/v1",
         "key": "MISTRAL_API_KEY",
         "model": "mistral-large-latest",
-        "price": (2.0, 6.0),
     },
     "openai": {
         "base": "https://api.openai.com/v1",
         "key": "OPENAI_API_KEY",
         "model": "gpt-4.1-mini",
-        "price": (0.4, 1.6),
     },
 }
+
+# Dollars per million tokens (prompt, completion), by model name prefix. Only
+# for the line printed at the end -- the budget is enforced on these numbers, so
+# an unknown model is priced pessimistically rather than as free.
+PRICES: list[tuple[str, tuple[float, float]]] = [
+    ("mistral-large", (2.0, 6.0)),
+    ("mistral-medium", (0.4, 2.0)),
+    ("mistral-small", (0.1, 0.3)),
+    ("gpt-4.1-mini", (0.4, 1.6)),
+    ("gpt-4.1", (2.0, 8.0)),
+]
+UNKNOWN_PRICE = (3.0, 15.0)
+
+
+def price_of(model: str) -> tuple[float, float]:
+    for prefix, price in PRICES:
+        if model.startswith(prefix):
+            return price
+    return UNKNOWN_PRICE
 
 OFFERED = [
     "get_skill",
@@ -223,7 +239,7 @@ def main() -> int:
     provider = PROVIDERS[args.provider]
     model = args.model or provider["model"]
     key = read_key(str(provider["key"]), args.env_file)
-    budget = Budget(args.budget, provider["price"])
+    budget = Budget(args.budget, price_of(model))
 
     paths = ApplacePaths(applace_home())
     server = build_server(paths)

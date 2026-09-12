@@ -1,0 +1,21 @@
+name: acme-web
+title: Acme internal web app
+description: >
+  The stack Acme's internal tools are built from: the Acme design system in
+  src/ui, the authenticated Acme API client in src/lib/acme.ts, and the house
+  rules already in the linter. Apps start from a page that uses all three, so an
+  agent has an example of the company's own components rather than a blank file.
+runtime: node
+commands:
+  install: npm install
+  dev: npm run dev -- --port {port} --strictPort --host 127.0.0.1
+  typecheck: npm run typecheck
+  lint: npm run lint
+  build: npm run build
+manifest: package.json
+dist: dist
+env_prefix: VITE_
+entry: src/App.tsx
+deploy:
+  - local
+  - vercel

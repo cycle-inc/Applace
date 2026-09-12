@@ -275,6 +275,21 @@ def app_detail(
         detail["entry"] = stack.entry
         detail["env_prefix"] = stack.env_prefix
         detail["deploy"] = list(stack.deploy)
+        # The app keeps the stack it was born from; the stack may have moved
+        # since (D7). Saying so is the whole of what Applace does about it --
+        # re-generating an app's files from a newer template would overwrite
+        # work that is already committed in the app's own history.
+        born = str(row["stack_commit"] or "")
+        detail["stack_commit"] = born or None
+        detail["stack_drifted"] = bool(
+            born and stack.commit is not None and born != stack.commit
+        )
+        if detail["stack_drifted"]:
+            detail["stack_note"] = (
+                f"this app was created from {stack.name} at {born[:12]}; the "
+                f"installed {stack.name} is now at {str(stack.commit)[:12]}. Its "
+                f"files are the ones in this repository, not the newer template."
+            )
     # Names and whether a human has answered, never a value (D8).
     declared = env.declarations(
         conn,

@@ -35,6 +35,12 @@ never run `git`, and never edit files outside the app.
   change touches in one call: they are type-checked together.
 - **Fix red before doing anything else.** A red app is dirty until it is green.
   Do not start a new feature on top of a failing build.
+- **A company stack's own components are the point of it.** If the app has
+  `src/ui/`, an API client, or anything else the stack shipped, read it and use
+  it. Writing a second button from scratch is not neutral: it is the thing the
+  stack exists to prevent. If `get_app` says `stack_drifted`, the app is older
+  than the installed stack — that is normal, its files are the ones in the
+  repository, and copying in the newer template is not your call to make.
 - **Prefer what the stack already has.** Every dependency you add costs an
   install, is reported, and may be refused by this machine's policy. React,
   the router and the styling are already there. Check `package.json` before

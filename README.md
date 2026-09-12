@@ -25,15 +25,16 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M7 are shipped**: the store (apps as git repositories), the compiler
+**M1 to M8 are shipped**: the store (apps as git repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
 real browser, its console and its failed requests), GitHub (every new app is a
 repository in your organisation, and every green snapshot is pushed there), the
 skill (the document an agent reads, the dependency policy, and the secret path),
-and deployment (a commit served from this machine or shipped to Vercel through
-its own repository, with production gated on a human). Company stacks and the
-handover to a human are next. The milestone list in [SPEC.md](SPEC.md) is the
+deployment (a commit served from this machine or shipped to Vercel through its
+own repository, with production gated on a human), and company stacks (installed
+from git, pinned to a commit, with the drift reported rather than applied). The
+handover to a human is next. The milestone list in [SPEC.md](SPEC.md) is the
 roadmap, and it is followed in order.
 
 ### Try it
@@ -83,6 +84,36 @@ uv run applace github adopt team-dashboard --repo acme/dash   # an existing repo
 
 If someone else pushed first, the push is refused and says where the remote is:
 Applace never force-pushes. Rebase the app, then `applace push` again.
+
+### Your own stack
+
+A stack is what makes this *your* Lovable rather than a generic one: the design
+system, the internal API client and the house lint rules an agent must not have
+to invent. It is a git repository you own, installed here and pinned to the
+commit it was cloned at.
+
+```bash
+uv run applace stacks add https://github.com/acme/web-stack.git   # --ref, --path, --name
+uv run applace stacks                                             # what is installed, and from where
+uv run applace new "Billing Portal" --stack acme-web
+```
+
+`examples/acme-stack/` in this repository is a working one — a design system in
+`template/src/ui`, an authenticated API client in `template/src/lib/acme.ts` —
+and its README shows how to install it from a local path.
+
+Every app records the stack commit it was born from. When the stack moves,
+`applace stacks update <name>` changes what **new** apps start from; existing
+apps are never rewritten, because their files are committed in their own
+repositories, which is where an agent's work and a human's both live.
+
+```bash
+uv run applace stacks update acme-web
+uv run applace stacks drift        # which apps are older than the stack now
+```
+
+An agent is told the same thing: `get_app` reports `stack_drifted` and says what
+it means, so it does not try to "upgrade" an app by hand.
 
 ### Secrets and configuration
 

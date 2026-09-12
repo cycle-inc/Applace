@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M7 are shipped.** M8 is next and is not yet built.
+> **Status: M1 to M8 are shipped.** M9 is next and is not yet built.
 
 ## What v1 is
 
@@ -132,7 +132,7 @@ applace init                      # create the home, register the built-in stack
 applace serve [--http PORT]       # the MCP server, stdio by default
 applace new <name> [--stack S]    # what create_app does, from a terminal
 applace ls                        # the apps, their state, their URLs
-applace stacks [add <git-url>]
+applace stacks [add <git-url> | update <name> | rm <name> | drift]
 applace dev <app>                 # start the preview, print its URL
 applace stop <app>                # stop it
 applace check <app>               # the D3 pipeline, by hand
@@ -344,9 +344,34 @@ And **a timing constant bound in a signature default cannot be tuned by a test**
 `wait(interval=POLL_INTERVAL)` read the module value at import, so the Vercel suite
 politely slept 47 seconds per run until both timings were resolved in the body.
 
-**M8 — Company stacks.** `applace stacks add <git-url>`, a stack carrying a design
-system and an internal API client, commit pinning, and what happens to apps when
-their stack moves.
+**M8 — Company stacks.** *Shipped.* `applace stacks add|update|rm|drift`, a stack
+carrying a design system and an internal API client (`examples/acme-stack`),
+commit pinning in `.applace-stack.yaml`, `stack_commit` on every app, and the
+drift reported by `applace stacks drift` and by `get_app`.
+*Acceptance:* `scripts/m8_acceptance.sh` — a company stack published as a git
+repository is installed and pinned, an app created from it is born with the
+company's components and passes the real gate without a model writing a line, the
+stack gains a component, and the app that predates it keeps its own files while
+being told, in `get_app`, exactly which commit it predates.
+
+What M8 learned. **The directory is the name.** A stack names itself in
+`stack.yaml`, but two forks of the same company stack both say `acme-web`, so the
+installed directory wins and `--name` is real: `load()` takes a name override and
+the registry passes the directory's. **Installing has to be validate-then-move.**
+A `stack.yaml` with a typo in it is not one broken stack, it is `list_stacks`,
+`applace stacks` and every `create_app` refusing to answer — so the clone goes to
+a temporary directory, `load()` has to accept it, and only then does it replace
+what was there, with the previous copy kept aside until the move has succeeded.
+**What is installed is a snapshot, not a second checkout**: the clone's `.git` is
+dropped and `.applace-stack.yaml` records the source, the ref and the sha, which
+makes `update` a re-clone and removes the question of what to do with local edits
+in a directory nobody thinks of as a repository. And **an update must not touch an
+app.** Rewriting an app's files from a newer template would overwrite work that is
+already committed in the app's own history (D1), and there is no merge in git for
+"the template moved" — so Applace reports the drift in three places and applies it
+in none. Installing a stack stays a human act with no MCP tool behind it, for the
+same reason `github connect` has none: it decides what every future app is made
+of.
 
 **M9 — Handover.** Opening a pull request instead of pushing to `main`, detecting a
 human's own edits in the working tree, `applace open`, `uvx applace` packaging and
