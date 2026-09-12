@@ -25,11 +25,12 @@ an *app* and serves it.
 
 ### Status
 
-**M1 — the store.** Creating apps from a stack, storing them as git
-repositories, and exposing that to an MCP host. The compiler (`write_files`),
-the preview, the screenshots, GitHub and deployment are specified in
-[SPEC.md](SPEC.md) and not yet built. The milestone list there is the roadmap,
-and it is followed in order.
+**M1 to M4 are shipped**: the store (apps as git repositories), the compiler
+(`write_files` type-checks, lints and builds before anything counts, and commits
+when it is green), the preview (a supervised dev server with a URL), and the
+eyes (a real browser, its console and its failed requests). GitHub, the skill
+and deployment are specified in [SPEC.md](SPEC.md) and not yet built. The
+milestone list there is the roadmap, and it is followed in order.
 
 ### Try it
 
@@ -37,6 +38,8 @@ and it is followed in order.
 uv sync
 uv run applace init
 uv run applace new "Team Dashboard"
+uv run applace dev team-dashboard      # a URL a human can watch
+uv run applace check team-dashboard    # typecheck, lint, build, commit if green
 uv run applace ls
 ```
 
@@ -49,6 +52,14 @@ cd ~/.applace/apps/team-dashboard
 npm run dev
 ```
 
+For the eyes, the browser is an extra:
+
+```bash
+uv sync --extra eyes
+uv run playwright install chromium
+uv run applace shot team-dashboard --route /
+```
+
 ### As an MCP server
 
 ```bash
@@ -56,7 +67,8 @@ uv run applace serve            # stdio
 uv run applace serve --http 8848
 ```
 
-Tools available today: `list_stacks`, `create_app`, `list_apps`, `get_app`.
+Tools available today: `list_stacks`, `create_app`, `list_apps`, `get_app`,
+`read_files`, `write_files`, `start_preview`, `stop_preview`, `screenshot_app`.
 
 ### Design
 

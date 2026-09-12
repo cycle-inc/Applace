@@ -9,6 +9,7 @@ human debugging what an agent did should not have to use different words.
 from __future__ import annotations
 
 from importlib import metadata
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -20,10 +21,12 @@ from .apps import (
     create_app,
     remove_app,
     require_app,
+    screenshot,
     start_preview,
     stop_preview,
 )
 from .db import connect, list_apps
+from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable, Shot
 from .gate import GateReport
 from .init_cmd import InitReport, run_init
 from .naming import InvalidName
@@ -96,6 +99,12 @@ def format_init(report: InitReport) -> str:
         mark = "ok " if requirement.present else "MISSING"
         where = requirement.path or requirement.detail
         lines.append(f"  {mark:<8} {requirement.name:<6} {where}")
+    if report.optional:
+        lines += ["", "Optional:"]
+        for requirement in report.optional:
+            mark = "ok " if requirement.present else "absent"
+            where = requirement.path or requirement.detail
+            lines.append(f"  {mark:<8} {requirement.name:<6} {where}")
     if report.error:
         lines += ["", report.error]
     if report.missing:
@@ -219,6 +228,64 @@ def stop(
     finally:
         conn.close()
     typer.echo(f"Stopped {name}" if stopped else f"{name} was not running")
+
+
+@app.command()
+def shot(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    route: Annotated[
+        str, typer.Option("--route", "-r", help="Which route to look at.")
+    ] = "/",
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Where to write the PNG."),
+    ] = None,
+    width: Annotated[int, typer.Option("--width", help="Viewport width.")] = DEFAULT_WIDTH,
+    height: Annotated[int, typer.Option("--height", help="Viewport height.")] = DEFAULT_HEIGHT,
+    full_page: Annotated[
+        bool, typer.Option("--full-page", help="Capture below the fold too.")
+    ] = False,
+) -> None:
+    """Open a route in a browser and report the console, the errors and the page.
+
+    Starts the preview if it is not already running, and leaves it running.
+    """
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        destination = out or paths.app_logs(str(row["slug"])) / "shot.png"
+        picture, started = screenshot(
+            paths, conn, name, route=route, width=width, height=height, full_page=full_page
+        )
+    except (AppError, StackError, PreviewError, EyesUnavailable) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(picture.png)
+    typer.echo(format_shot(picture, destination, started=started))
+    if picture.errors or picture.blank:
+        raise typer.Exit(code=1)
+
+
+def format_shot(picture: Shot, destination: Path, *, started: bool) -> str:
+    lines = [picture.url, f"  title  {picture.title or '(none)'}", f"  png    {destination}"]
+    if started:
+        lines.append("  note   started the preview; `applace stop` when you are done")
+    if picture.blank:
+        lines.append("  BLANK  the page rendered no text at all")
+    for message in picture.console:
+        mark = {"error": "ERROR", "warning": "warn "}.get(message.level, "info ")
+        lines.append(f"  {mark}  {message.text}")
+    for request in picture.failed_requests:
+        lines.append(f"  FAILED {request.method} {request.url} — {request.error}")
+    if not picture.console and not picture.failed_requests and not picture.blank:
+        lines.append("  clean  nothing in the console, nothing failed")
+    return "\n".join(lines)
 
 
 @app.command()

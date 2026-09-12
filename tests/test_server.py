@@ -8,10 +8,12 @@ structured results are all part of what these tests check.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from conftest import call_tool
 from mcp.server.mcpserver import MCPServer
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from applace.db import Connection
 from applace.paths import ApplacePaths
@@ -28,6 +30,7 @@ TOOLS = {
     "write_files",
     "start_preview",
     "stop_preview",
+    "screenshot_app",
 }
 
 
@@ -157,5 +160,52 @@ def test_write_files_builds_commits_and_says_what_it_committed(home: Home) -> No
 def test_write_files_on_an_unknown_app_is_a_readable_result(home: Home) -> None:
     paths, _ = home
     result = call(build_server(paths), "write_files", app="nope", files={"a.txt": "x"})
+    assert result["ok"] is False
+    assert result["code"] == "unknown-app"
+
+
+def test_screenshot_app_sends_back_the_picture_and_the_report(
+    home: Home, monkeypatch: Any
+) -> None:
+    """The image has to arrive as an image, with the JSON alongside it.
+
+    The browser is faked here on purpose: what is under test is the shape of the
+    MCP result, not Chromium. test_eyes.py drives the real thing.
+    """
+    import applace.server as server_module
+    from applace.eyes import ConsoleMessage, Shot
+
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+
+    picture = Shot(
+        url="http://127.0.0.1:5180/",
+        title="Team Dashboard",
+        png=b"\x89PNG-not-really",
+        console=[ConsoleMessage(level="error", text="TypeError: boom")],
+        text_length=0,
+    )
+    monkeypatch.setattr(
+        server_module, "screenshot_for", lambda *a, **k: (picture, True)
+    )
+
+    result = asyncio.run(server.call_tool("screenshot_app", {"app": "team-dashboard"}))
+    assert isinstance(result, CallToolResult), result
+    assert not result.is_error, result.content
+    image, text = result.content
+    assert isinstance(image, ImageContent), image
+    assert isinstance(text, TextContent), text
+    assert image.mime_type == "image/png"
+    report = json.loads(text.text)
+    assert report["ok"] is True
+    assert report["started_preview"] is True
+    assert report["blank"] is True
+    assert report["errors"][0]["text"] == "TypeError: boom"
+
+
+def test_screenshot_app_on_an_unknown_app_is_a_readable_result(home: Home) -> None:
+    paths, _ = home
+    result = call(build_server(paths), "screenshot_app", app="nope")
     assert result["ok"] is False
     assert result["code"] == "unknown-app"

@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1, M2 and M3 are shipped.** M4 is next and is not yet built.
+> **Status: M1 to M4 are shipped.** M5 is next and is not yet built.
 
 ## What v1 is
 
@@ -133,7 +133,10 @@ applace serve [--http PORT]       # the MCP server, stdio by default
 applace new <name> [--stack S]    # what create_app does, from a terminal
 applace ls                        # the apps, their state, their URLs
 applace stacks [add <git-url>]
-applace dev <app>                 # preview in the foreground
+applace dev <app>                 # start the preview, print its URL
+applace stop <app>                # stop it
+applace check <app>               # the D3 pipeline, by hand
+applace shot <app> [--route R]    # what the browser sees, and what it said (D5)
 applace open <app>                # the app in $EDITOR, the repo in a browser
 applace env set <app> <NAME>      # prompts for the value, never echoes it (D8)
 applace github connect --org O    # the D2b answer
@@ -224,10 +227,26 @@ way node asks it**, with `SO_REUSEADDR`: without it every port Applace just
 stopped a preview on reads as busy for the two minutes its last connection
 spends in `TIME_WAIT`.
 
-**M4 — The eyes.** `screenshot_app`, browser console capture, failed-request
-capture, route and viewport selection.
-*Acceptance:* an app that builds green but throws at runtime is diagnosed from the
-console output alone, with no human looking at the screen.
+**M4 — The eyes.** *Shipped.* `screenshot_app`, browser console capture,
+failed-request capture, route and viewport selection, the `shot` CLI verb, and
+`applace init` reporting the browser as optional.
+*Acceptance:* `scripts/m4_acceptance.sh` — an app that builds green but throws at
+runtime is diagnosed from the console output alone, with no human looking at the
+screen.
+
+What M4 learned. **The console is the diagnosis and the picture is the
+evidence**: the acceptance run came back with `TypeError: Cannot read properties
+of undefined (reading 'map')` at `App (…/src/App.tsx:10:66)` for a page whose
+screenshot is a white rectangle, so an uncaught exception is recorded with its
+name, its message and its first non-`node_modules` frame — `str(error)` alone is
+the message without either. **"Did anything render" must be asked with
+`innerText`, not `textContent`**: `textContent` counts the source of every inline
+`<script>` as text on the page, which reports a blank page with a script in it as
+rendered. And **an optional dependency must be optional all the way to the
+report**: eyes live behind `applace[eyes]`, a missing browser is an instruction
+rather than a traceback, `init` lists it apart from the requirements so it never
+makes a machine "not ready", and playwright's own teardown chatter is filtered
+out of stderr so a tool result never looks like a crash.
 
 **M5 — GitHub.** `applace github connect`, repository creation, remote wiring,
 automatic push of green snapshots, adoption of an existing repository, and the D13

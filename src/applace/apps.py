@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import gitrepo, preview, shell
+from . import eyes, gitrepo, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots
@@ -252,6 +252,35 @@ def start_preview(
         root=Path(str(row["path"])),
         stack=resolve(paths.stacks, str(row["stack"])),
         port=port,
+    )
+
+
+def screenshot(
+    paths: ApplacePaths,
+    conn: Connection,
+    key: str,
+    *,
+    route: str = "/",
+    width: int = eyes.DEFAULT_WIDTH,
+    height: int = eyes.DEFAULT_HEIGHT,
+    full_page: bool = False,
+) -> tuple[eyes.Shot, bool]:
+    """Look at a route of the app. Starts the preview if it is not running.
+
+    Returns the shot and whether a preview had to be started, which the caller
+    reports -- an agent should know it now owns a dev server.
+    """
+    row = require_app(conn, key)
+    running = preview.status(
+        conn, str(row["id"]), str(row["slug"]), Path(str(row["path"]))
+    )
+    started = running is None
+    if running is None:
+        running = start_preview(paths, conn, key)
+    url = running.url.rstrip("/") + "/" + route.lstrip("/")
+    return (
+        eyes.capture(url, width=width, height=height, full_page=full_page),
+        started,
     )
 
 

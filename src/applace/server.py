@@ -12,14 +12,16 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 from . import gate
 from .apps import AppError, app_detail, app_summary, create_app, require_app
+from .apps import screenshot as screenshot_for
 from .apps import start_preview as start_preview_for
 from .apps import stop_preview as stop_preview_for
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
+from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable
 from .gitrepo import GitError
 from .preview import PreviewError
 from .naming import InvalidName
@@ -172,6 +174,51 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             except AppError as exc:
                 return {"ok": False, "code": "unknown-app", "error": str(exc)}
             return {"ok": True, "app": app, "stopped": stopped}
+
+    # Sync: this drives a browser, which is seconds.
+    @server.tool()
+    def screenshot_app(
+        app: str,
+        route: str = "/",
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        full_page: bool = False,
+    ) -> Any:
+        """Look at a route of the app: the picture, the console, and what failed.
+
+        Use this after a green write, before telling anyone the app is done. A
+        build that passes and a page that renders are two different facts.
+
+        You get back the screenshot *and* a JSON report. Read the report first:
+        `blank` true means the page painted nothing, `errors` is what the
+        browser's console said, and `failed_requests` is every request that
+        404'd or never completed -- that is usually an API path or an asset that
+        does not exist. A white page with a `TypeError` in `errors` is a fixable
+        bug; the picture alone would only tell you it is white.
+
+        Starts the app's preview if it is not already running, and leaves it
+        running. On failure `code` is unknown-app, preview-failed or
+        eyes-unavailable.
+        """
+        with session() as conn:
+            try:
+                shot, started = screenshot_for(
+                    home, conn, app,
+                    route=route, width=width, height=height, full_page=full_page,
+                )
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except PreviewError as exc:
+                return {"ok": False, "code": "preview-failed", "error": str(exc)}
+            except EyesUnavailable as exc:
+                return {"ok": False, "code": "eyes-unavailable", "error": str(exc)}
+        # A list, not a dict: the image has to reach the model as an image, and
+        # that costs the structured-content half of the result. The JSON goes
+        # alongside it as text, which is what every host renders anyway.
+        return [
+            Image(data=shot.png, format="png"),
+            {"ok": True, "app": app, "started_preview": started, **shot.report()},
+        ]
 
     @server.tool()
     def read_files(app: str, paths: list[str]) -> dict[str, Any]:

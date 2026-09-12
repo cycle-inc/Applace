@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from applace.cli import app
@@ -120,6 +121,87 @@ def test_check_runs_the_gate_and_commits_a_hand_edit(home: Home) -> None:
     assert result.exit_code == 0, result.output
     assert "green" in result.output
     assert "committed" in result.output
+
+
+def test_shot_writes_the_png_and_prints_what_the_browser_said(
+    home: Home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The browser is faked; what is under test is the report a human reads."""
+    import applace.cli as cli_module
+    from applace.eyes import ConsoleMessage, FailedRequest, Shot
+
+    paths, _ = home
+    runner.invoke(app, ["new", "Shot App", "--stack", "fake", "--no-install"])
+    picture = Shot(
+        url="http://127.0.0.1:5180/",
+        title="Shot App",
+        png=b"\x89PNG-not-really",
+        console=[ConsoleMessage(level="error", text="TypeError: boom")],
+        failed_requests=[FailedRequest(url="/api/teams", method="GET", status=404, error="HTTP 404")],
+        text_length=0,
+    )
+    monkeypatch.setattr(cli_module, "screenshot", lambda *a, **k: (picture, True))
+
+    result = runner.invoke(app, ["shot", "shot-app"])
+    # Non-zero: the page is broken, and a script running this should notice.
+    assert result.exit_code == 1, result.output
+    assert "BLANK" in result.output
+    assert "TypeError: boom" in result.output
+    assert "/api/teams" in result.output
+    assert "started the preview" in result.output
+    assert (paths.app_logs("shot-app") / "shot.png").read_bytes() == picture.png
+
+
+def test_shot_on_a_healthy_page_is_quiet_and_succeeds(
+    home: Home, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import applace.cli as cli_module
+    from applace.eyes import Shot
+
+    runner.invoke(app, ["new", "Shot App", "--stack", "fake", "--no-install"])
+    picture = Shot(
+        url="http://127.0.0.1:5180/",
+        title="Shot App",
+        png=b"\x89PNG-not-really",
+        text_length=42,
+    )
+    monkeypatch.setattr(cli_module, "screenshot", lambda *a, **k: (picture, False))
+
+    destination = tmp_path / "elsewhere" / "page.png"
+    result = runner.invoke(app, ["shot", "shot-app", "--out", str(destination)])
+    assert result.exit_code == 0, result.output
+    assert "clean" in result.output
+    assert destination.exists()
+
+
+def test_shot_says_how_to_get_a_browser_when_there_is_none(
+    home: Home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import applace.cli as cli_module
+    from applace.eyes import INSTALL_HINT, EyesUnavailable
+
+    runner.invoke(app, ["new", "Shot App", "--stack", "fake", "--no-install"])
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise EyesUnavailable(INSTALL_HINT)
+
+    monkeypatch.setattr(cli_module, "screenshot", refuse)
+    result = runner.invoke(app, ["shot", "shot-app"])
+    assert result.exit_code == 1
+    assert "playwright install" in result.output
+
+
+def test_init_reports_the_browser_as_optional(paths: ApplacePaths) -> None:
+    """Missing eyes must never make a machine "not ready": they are optional."""
+    import applace.init_cmd as init_module
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0, result.output
+    assert "Optional:" in result.output
+    assert "browser" in result.output
+    report = init_module.run_init(paths)
+    assert [r.name for r in report.optional] == ["browser"]
+    assert report.ready is True
 
 
 def test_check_exits_nonzero_and_prints_the_errors_when_red(home: Home) -> None:

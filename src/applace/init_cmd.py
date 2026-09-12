@@ -11,6 +11,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import eyes
 from .db import connect
 from .paths import ApplacePaths
 from .stacks import StackError, registry
@@ -41,6 +42,10 @@ class InitReport:
     created: bool
     stacks: list[tuple[str, str]] = field(default_factory=list)
     requirements: list[Requirement] = field(default_factory=list)
+    # Things Applace is better with and works without. Kept apart from
+    # `requirements` so a missing one never makes `ready` false: an agent that
+    # builds, commits and pushes needs no browser.
+    optional: list[Requirement] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -68,5 +73,12 @@ def run_init(paths: ApplacePaths) -> InitReport:
     report.requirements = [
         Requirement(name=name, detail=detail, path=shutil.which(name))
         for name, detail in REQUIREMENTS.items()
+    ]
+    report.optional = [
+        Requirement(
+            name="browser",
+            detail=eyes.INSTALL_HINT,
+            path=eyes.browser_path(),
+        )
     ]
     return report

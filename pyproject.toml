@@ -26,6 +26,12 @@ dependencies = [
     "typer>=0.12",
 ]
 
+[project.optional-dependencies]
+# The eyes (D5). Kept out of the base install because a browser is 150 MB and a
+# harness that only builds and pushes does not need one: `uvx applace` stays
+# small, and `applace init` says what is missing and how to get it.
+eyes = ["playwright>=1.49"]
+
 [project.urls]
 Homepage = "https://github.com/cycle-inc/Applace"
 Repository = "https://github.com/cycle-inc/Applace"
@@ -38,6 +44,7 @@ applace = "applace.cli:main"
 dev = [
     "pytest>=8.0",
     "pyright>=1.1.390",
+    "playwright>=1.49",
 ]
 
 [build-system]
@@ -51,6 +58,7 @@ packages = ["src/applace"]
 testpaths = ["tests"]
 markers = [
     "needs_npm: requires npm on PATH and a working network, and takes tens of seconds",
+    "needs_browser: requires a chromium installed by `playwright install chromium`",
 ]
 
 [tool.pyright]
