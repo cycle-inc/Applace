@@ -24,12 +24,13 @@ from typing import Any
 
 from . import diagnostics, files, gitrepo, shell
 from .apps import INSTALL_TIMEOUT, require_app
-from .db import Connection, insert_gate, insert_snapshot
+from .db import Connection, insert_gate, insert_snapshot, unpushed
 from .diagnostics import Diagnostic
 from .files import PathRefused
 from .paths import ApplacePaths
 from .shell import CommandNotFound
 from .stacks import Stack, resolve
+from .sync import PushReport, push_app
 
 # In order. `install` is conditional and the two middle stages are optional --
 # a stack that declares neither still gets a build, which is the real gate.
@@ -72,9 +73,12 @@ class GateReport:
     committed: bool = False
     dirty: bool = False
     duration_ms: int = 0
+    # Filled by the push that follows a green commit (D2). None when the app has
+    # no repository, which is the normal state until someone connects an org.
+    push: PushReport | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "app": self.app,
             "ok": self.ok,
             "stage": self.stage,
@@ -88,6 +92,9 @@ class GateReport:
             "dirty": self.dirty,
             "duration_ms": self.duration_ms,
         }
+        if self.push is not None:
+            out["github"] = self.push.as_dict()
+        return out
 
 
 def write_files(
@@ -153,6 +160,13 @@ def write_files(
     report.dirty = gitrepo.is_dirty(root)
     _journal(conn, row, report, snapshot_id=snapshot_id)
     conn.commit()
+
+    # After the journal, deliberately: a push is a fact about GitHub, not about
+    # the gate, and a network that is down must not turn a green write red (D2).
+    # A green re-check with nothing to commit still pushes, which is how an app
+    # whose last push was refused catches up once the divergence is resolved.
+    if report.ok and row["github_repo"] and (report.committed or unpushed(conn, str(row["id"]))):
+        report.push = push_app(paths, conn, require_app(conn, slug))
     return report
 
 

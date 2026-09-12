@@ -39,8 +39,10 @@ tree, read_files and write_files to change it.
 
 write_files is a compiler: every write is type-checked, linted and built before
 it is kept, and you get the real tool's errors back with file and line when it
-is not. start_preview gives a human a URL to watch while you work. Nothing you
-create is thrown away -- every green change is a commit.
+is not. start_preview gives a human a URL to watch while you work, and
+screenshot_app tells you what the page actually did. Nothing you create is
+thrown away -- every green change is a commit, and when the machine has a GitHub
+organisation connected, every commit is pushed to the app's own repository.
 """
 
 
@@ -93,6 +95,11 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         This takes a minute or two -- it installs dependencies -- and when it
         returns the app already builds. Read `entry` and start there.
+
+        If this machine has a GitHub organisation connected, the app is also a
+        repository there from birth: `github_url` is where a human can see it.
+        Anything that went wrong on the way is in `warnings`, and none of it
+        means the app failed.
 
         On failure `code` is invalid-name, app-exists or unknown-stack.
         """
@@ -259,7 +266,13 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         `new_deps` lists dependencies your change added: adding one costs an
         install, so prefer what the stack already has.
 
-        Call this with no `files` to re-check an app that is already dirty.
+        When the app has a GitHub repository, `github` says whether the commit
+        reached it. `github.diverged` true means someone else pushed and Applace
+        refused rather than overwrite them -- say so to the human, do not try to
+        work around it.
+
+        Call this with no `files` to re-check an app that is already dirty, or to
+        retry a push that was refused.
 
         On failure `code` is unknown-app or unknown-stack.
         """

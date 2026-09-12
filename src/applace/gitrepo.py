@@ -7,11 +7,24 @@ honest wrapper -- if a call fails, the caller gets git's own message.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_BRANCH = "main"
+
+# Fed the token through the environment rather than the command line: argv is
+# world-readable in `ps`, and a remote URL with the token in it would also be
+# written into `.git/config` by anything that later saves it. The empty helper
+# first resets the list, which is what stops the machine's own credential store
+# from answering with the wrong account's token -- the failure this exists for.
+TOKEN_VARIABLE = "APPLACE_GIT_TOKEN"
+_CREDENTIAL_HELPER = (
+    '!f() { test "$1" = get || exit 0; '
+    'echo "username=x-access-token"; '
+    f'echo "password=${TOKEN_VARIABLE}"; }}; f'
+)
 
 # Used only when the machine has no git identity at all. Commits Applace makes
 # on behalf of an agent are still the user's commits, so a configured identity
@@ -31,7 +44,7 @@ class Commit:
     message: str
 
 
-def git(*args: str, cwd: Path) -> str:
+def git(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
     """Run one git command and return its stdout, or raise with git's stderr."""
     try:
         completed = subprocess.run(
@@ -40,6 +53,7 @@ def git(*args: str, cwd: Path) -> str:
             capture_output=True,
             text=True,
             check=False,
+            env=None if env is None else {**os.environ, **env},
         )
     except FileNotFoundError as exc:  # pragma: no cover - git is a hard dependency
         raise GitError("git is not on PATH, and Applace stores every app in it.") from exc
@@ -132,6 +146,94 @@ def log(path: Path, limit: int = 20) -> list[Commit]:
         sha, message = line.split("\x00", 1)
         commits.append(Commit(sha=sha, message=message))
     return commits
+
+
+def set_remote(path: Path, url: str, *, name: str = "origin") -> None:
+    """Point ``name`` at ``url``, adding it if it is not there yet.
+
+    The URL stored is the plain https one a human would use: their own
+    credentials answer for it, and nothing secret is written into the
+    repository's config.
+    """
+    if remote_url(path, name=name) is None:
+        git("remote", "add", name, url, cwd=path)
+    else:
+        git("remote", "set-url", name, url, cwd=path)
+
+
+def remote_url(path: Path, *, name: str = "origin") -> str | None:
+    try:
+        return git("remote", "get-url", name, cwd=path).strip() or None
+    except GitError:
+        return None
+
+
+def _authenticated(token: str | None) -> dict[str, str]:
+    """The environment a push needs: our token, and no prompt, ever."""
+    env = {"GIT_TERMINAL_PROMPT": "0"}
+    if token:
+        env[TOKEN_VARIABLE] = token
+    return env
+
+
+def _credential_args(token: str | None) -> list[str]:
+    if not token:
+        return []
+    return ["-c", "credential.helper=", "-c", f"credential.helper={_CREDENTIAL_HELPER}"]
+
+
+def fetch(path: Path, url: str, branch: str, *, token: str | None = None) -> str | None:
+    """Fetch ``branch`` from ``url`` and return the sha it points at.
+
+    None means the remote has no such branch yet, which is the normal state of a
+    repository Applace has just created. A remote that cannot be reached raises.
+    """
+    try:
+        git(
+            *_credential_args(token),
+            "fetch",
+            "--quiet",
+            url,
+            branch,
+            cwd=path,
+            env=_authenticated(token),
+        )
+    except GitError as exc:
+        if "couldn't find remote ref" in str(exc):
+            return None
+        raise
+    return git("rev-parse", "FETCH_HEAD", cwd=path).strip()
+
+
+def contains(path: Path, sha: str) -> bool:
+    """Is ``sha`` an ancestor of HEAD -- that is, do we already have that work?
+
+    This is the D13 question. If the remote's tip is not in our history, someone
+    else pushed and the snapshot is refused rather than forced over.
+    """
+    try:
+        git("merge-base", "--is-ancestor", sha, "HEAD", cwd=path)
+    except GitError:
+        return False
+    return True
+
+
+def push(
+    path: Path,
+    url: str,
+    branch: str = DEFAULT_BRANCH,
+    *,
+    token: str | None = None,
+) -> None:
+    """Push ``branch`` to ``url``. Never forced, never rewriting (D13)."""
+    git(
+        *_credential_args(token),
+        "push",
+        url,
+        f"HEAD:refs/heads/{branch}",
+        cwd=path,
+        env=_authenticated(token),
+    )
 
 
 def tracked_files(path: Path) -> list[str]:

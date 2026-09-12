@@ -15,10 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import eyes, gitrepo, preview, shell
+from . import eyes, github, gitrepo, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
-from .db import list_snapshots
+from .db import list_snapshots, unpushed
+from .github import GitHubError
+from .sync import connect_app, push_app
 from .naming import display_name, slugify
 from .paths import ApplacePaths
 from .stacks import Stack, resolve
@@ -52,6 +54,9 @@ class CreateReport:
     files: list[str]
     installed: bool
     warnings: list[str] = field(default_factory=list)
+    repo: str | None = None
+    github_url: str | None = None
+    pushed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +69,9 @@ class CreateReport:
             "files": self.files,
             "installed": self.installed,
             "warnings": self.warnings,
+            "repo": self.repo,
+            "github_url": self.github_url,
+            "pushed": self.pushed,
         }
 
 
@@ -75,6 +83,7 @@ def create_app(
     stack_name: str | None = None,
     description: str | None = None,
     install: bool = True,
+    publish: bool = True,
 ) -> CreateReport:
     """Render a stack into a new repository and record it.
 
@@ -149,7 +158,7 @@ def create_app(
     )
     conn.commit()
 
-    return CreateReport(
+    report = CreateReport(
         slug=slug,
         name=title,
         path=target,
@@ -160,6 +169,45 @@ def create_app(
         installed=installed,
         warnings=warnings,
     )
+    if publish:
+        _publish(paths, conn, slug, report, description=description)
+    return report
+
+
+def _publish(
+    paths: ApplacePaths,
+    conn: Connection,
+    slug: str,
+    report: CreateReport,
+    *,
+    description: str | None,
+) -> None:
+    """Give the new app its repository, if an organisation is connected (D2).
+
+    Every failure here is a warning, never an exception: the app exists, it is
+    committed, and "GitHub was down" must not cost a developer their work. The
+    fix is `applace push`, and the warning says so.
+    """
+    if github.load(paths) is None:
+        return
+    row = find_app(conn, slug)
+    if row is None:  # pragma: no cover - it was inserted a line ago
+        return
+    try:
+        repository = connect_app(paths, conn, row, description=description)
+    except GitHubError as exc:
+        report.warnings.append(f"{exc}\nThe app is committed locally. `applace push {slug}` retries.")
+        return
+    report.repo = repository.full_name
+    report.github_url = repository.html_url
+
+    pushed = push_app(paths, conn, find_app(conn, slug))
+    report.pushed = pushed.pushed
+    if not pushed.pushed:
+        report.warnings.append(
+            f"{repository.full_name} exists but the first push did not land: "
+            f"{pushed.reason}"
+        )
 
 
 def require_app(conn: Connection, key: str) -> Any:
@@ -213,6 +261,10 @@ def app_detail(
     detail["uncommitted"] = gitrepo.status(path)
     detail["snapshots"] = len(list_snapshots(conn, str(row["id"])))
     detail["installed"] = (path / "node_modules").is_dir()
+    detail["repo"] = row["github_repo"]
+    # Commits that are here and not known to be on GitHub. Non-zero means a push
+    # was refused or the machine was offline, and the next one carries them all.
+    detail["unpushed"] = len(unpushed(conn, str(row["id"])))
     detail.update(outstanding(conn, str(row["id"])))
     live = preview.status(conn, str(row["id"]), str(row["slug"]), path)
     detail["preview"] = live.as_dict() if live is not None else None

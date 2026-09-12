@@ -85,6 +85,10 @@ MIGRATIONS: list[str] = [
         log_path   TEXT NOT NULL,
         started_at TEXT NOT NULL
     )""",
+    # v4 (M5): when a snapshot reached GitHub. NULL means it is still only here,
+    # which happens whenever a push was refused or the machine was offline --
+    # and the next successful push carries it along with the ones after it.
+    "ALTER TABLE snapshots ADD COLUMN pushed_at TEXT",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -178,6 +182,45 @@ def find_app(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
 
 def list_apps(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM apps ORDER BY slug"))
+
+
+def set_github(
+    conn: sqlite3.Connection,
+    *,
+    app_id: str,
+    repo: str,
+    url: str,
+    default_branch: str,
+) -> None:
+    """Record which repository an app belongs to, once it has one."""
+    conn.execute(
+        "UPDATE apps SET github_repo = ?, github_url = ?, default_branch = ? WHERE id = ?",
+        (repo, url, default_branch, app_id),
+    )
+
+
+def mark_pushed(conn: sqlite3.Connection, app_id: str) -> None:
+    """Say that everything local is on the remote, because a push just sent it.
+
+    Not "the snapshot whose sha is HEAD": a human who rebased to reconcile with
+    the remote has given our commits new shas, and matching on sha would leave
+    the old ones outstanding forever. A push sends the whole reachable history,
+    so after one succeeds there is nothing left behind.
+    """
+    conn.execute(
+        "UPDATE snapshots SET pushed_at = ? WHERE app_id = ? AND pushed_at IS NULL",
+        (now_iso(), app_id),
+    )
+
+
+def unpushed(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
+    """Snapshots that are not known to be on the remote, oldest first."""
+    return list(
+        conn.execute(
+            "SELECT * FROM snapshots WHERE app_id = ? AND pushed_at IS NULL ORDER BY rowid",
+            (app_id,),
+        )
+    )
 
 
 def delete_app(conn: sqlite3.Connection, app_id: str) -> None:

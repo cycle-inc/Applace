@@ -25,12 +25,13 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M4 are shipped**: the store (apps as git repositories), the compiler
+**M1 to M5 are shipped**: the store (apps as git repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
-when it is green), the preview (a supervised dev server with a URL), and the
-eyes (a real browser, its console and its failed requests). GitHub, the skill
-and deployment are specified in [SPEC.md](SPEC.md) and not yet built. The
-milestone list there is the roadmap, and it is followed in order.
+when it is green), the preview (a supervised dev server with a URL), the eyes (a
+real browser, its console and its failed requests), and GitHub (every new app is
+a repository in your organisation, and every green snapshot is pushed there).
+The skill and deployment are specified in [SPEC.md](SPEC.md) and not yet built.
+The milestone list there is the roadmap, and it is followed in order.
 
 ### Try it
 
@@ -59,6 +60,26 @@ uv sync --extra eyes
 uv run playwright install chromium
 uv run applace shot team-dashboard --route /
 ```
+
+### Connect it to your GitHub
+
+```bash
+uv run applace github connect --org acme     # --visibility, --prefix, --team
+uv run applace github status
+```
+
+From then on every app Applace creates is a repository in `acme`, and every
+green snapshot is pushed to it — the agent chooses nothing about this and is
+told about it. A token comes from `APPLACE_GITHUB_TOKEN`, `GH_TOKEN`,
+`GITHUB_TOKEN` or `gh auth token`, and never reaches the model.
+
+```bash
+uv run applace push team-dashboard                            # retry a push
+uv run applace github adopt team-dashboard --repo acme/dash   # an existing repo
+```
+
+If someone else pushed first, the push is refused and says where the remote is:
+Applace never force-pushes. Rebase the app, then `applace push` again.
 
 ### As an MCP server
 

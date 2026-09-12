@@ -11,7 +11,7 @@ import asyncio
 import json
 from typing import Any
 
-from conftest import call_tool
+from conftest import FakeGitHub, call_tool, connected
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent
 
@@ -162,6 +162,29 @@ def test_write_files_on_an_unknown_app_is_a_readable_result(home: Home) -> None:
     result = call(build_server(paths), "write_files", app="nope", files={"a.txt": "x"})
     assert result["ok"] is False
     assert result["code"] == "unknown-app"
+
+
+def test_an_agent_sees_the_repository_it_never_asked_for(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    """The agent chooses nothing about GitHub, and is told everything (D2b)."""
+    paths, _ = home
+    connected(paths, fake_github)
+    server = build_server(paths)
+
+    created = call(server, "create_app", name="Team Dashboard", stack="fake")
+    assert created["github_url"] == "https://github.test/acme/team-dashboard"
+    assert created["pushed"] is True
+
+    written = call(
+        server, "write_files", app="team-dashboard", files={"src/page.txt": "a page\n"}
+    )
+    assert written["github"]["pushed"] is True
+    assert written["github"]["repo"] == "acme/team-dashboard"
+
+    detail = call(server, "get_app", app="team-dashboard")
+    assert detail["repo"] == "acme/team-dashboard"
+    assert detail["unpushed"] == 0
 
 
 def test_screenshot_app_sends_back_the_picture_and_the_report(

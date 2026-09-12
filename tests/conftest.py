@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -10,6 +13,8 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from applace.db import Connection, connect
+from applace.github import GitHubLink
+from applace.github import save as save_link
 from applace.paths import ApplacePaths
 
 # A stack that needs nothing but `true` on PATH. Almost every test wants to know
@@ -80,6 +85,141 @@ def npm() -> str:
     if executable is None:
         pytest.skip("npm is not on PATH")
     return executable
+
+
+class FakeGitHub:
+    """A GitHub that answers on localhost and whose repositories are real.
+
+    Every repository it "creates" is an actual bare git repository in a
+    temporary directory, and its `clone_url` is a `file://` URL pointing at it.
+    That is what lets the push path be tested end to end -- fetch, divergence
+    and all -- with git doing its own work rather than a mock agreeing with us.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.repos: dict[str, dict[str, Any]] = {}
+        self.requests: list[tuple[str, str]] = []
+        self.tokens: list[str] = []
+        self.refuse_creation: str | None = None
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def api_base(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    def bare(self, full_name: str) -> Path:
+        return self.root / f"{full_name.replace('/', '__')}.git"
+
+    def create(self, full_name: str, *, private: bool = True) -> dict[str, Any]:
+        bare = self.bare(full_name)
+        if not bare.exists():
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(bare)],
+                check=True, capture_output=True,
+            )
+        record = {
+            "full_name": full_name,
+            "name": full_name.split("/")[-1],
+            "html_url": f"https://github.test/{full_name}",
+            "clone_url": bare.as_uri(),
+            "private": private,
+            "default_branch": "main",
+        }
+        self.repos[full_name] = record
+        return record
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+            def _body(self) -> dict[str, Any]:
+                length = int(self.headers.get("Content-Length") or 0)
+                return json.loads(self.rfile.read(length) or b"{}") if length else {}
+
+            def _reply(self, status: int, payload: dict[str, Any]) -> None:
+                raw = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def _authorised(self) -> bool:
+                header = self.headers.get("Authorization", "")
+                if not header.startswith("Bearer "):
+                    return False
+                fake.tokens.append(header.removeprefix("Bearer "))
+                return True
+
+            def do_GET(self) -> None:
+                fake.requests.append(("GET", self.path))
+                if not self._authorised():
+                    return self._reply(401, {"message": "Bad credentials"})
+                if self.path.startswith("/orgs/") and self.path.count("/") == 2:
+                    return self._reply(200, {"login": self.path.split("/")[2]})
+                if self.path.startswith("/repos/"):
+                    full_name = self.path.removeprefix("/repos/")
+                    record = fake.repos.get(full_name)
+                    if record is None:
+                        return self._reply(404, {"message": "Not Found"})
+                    return self._reply(200, record)
+                self._reply(404, {"message": "Not Found"})
+
+            def do_POST(self) -> None:
+                fake.requests.append(("POST", self.path))
+                payload = self._body()
+                if not self._authorised():
+                    return self._reply(401, {"message": "Bad credentials"})
+                if fake.refuse_creation:
+                    return self._reply(403, {"message": fake.refuse_creation})
+                org = self.path.split("/")[2]
+                full_name = f"{org}/{payload['name']}"
+                if full_name in fake.repos:
+                    return self._reply(
+                        422,
+                        {"message": "Repository creation failed",
+                         "errors": [{"message": "name already exists on this account"}]},
+                    )
+                self._reply(201, fake.create(full_name, private=payload.get("private", True)))
+
+            def do_PUT(self) -> None:
+                fake.requests.append(("PUT", self.path))
+                if not self._authorised():
+                    return self._reply(401, {"message": "Bad credentials"})
+                self._reply(204, {})
+
+        return Handler
+
+
+@pytest.fixture
+def fake_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGitHub]:
+    """A GitHub on localhost, with a token in the environment to reach it."""
+    monkeypatch.setenv("APPLACE_GITHUB_TOKEN", "t0ken-for-tests")
+    root = tmp_path / "github"
+    root.mkdir()
+    fake = FakeGitHub(root)
+    try:
+        yield fake
+    finally:
+        fake.close()
+
+
+def connected(paths: ApplacePaths, fake: FakeGitHub, **overrides: Any) -> GitHubLink:
+    """Connect the home to the fake GitHub, as `applace github connect` does."""
+    link = GitHubLink(org="acme", api_base=fake.api_base, **overrides)
+    save_link(paths, link)
+    return link
 
 
 def call_tool(server: Any, tool: str, /, **arguments: Any) -> dict[str, Any]:

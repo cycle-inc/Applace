@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M4 are shipped.** M5 is next and is not yet built.
+> **Status: M1 to M5 are shipped.** M6 is next and is not yet built.
 
 ## What v1 is
 
@@ -248,11 +248,28 @@ rather than a traceback, `init` lists it apart from the requirements so it never
 makes a machine "not ready", and playwright's own teardown chatter is filtered
 out of stderr so a tool result never looks like a crash.
 
-**M5 — GitHub.** `applace github connect`, repository creation, remote wiring,
-automatic push of green snapshots, adoption of an existing repository, and the D13
-divergence refusal.
-*Acceptance:* an app created in a chat exists on GitHub a moment later, with its
-history; a push made behind Applace's back makes the next snapshot refuse.
+**M5 — GitHub.** *Shipped.* `applace github connect`, repository creation, remote
+wiring, automatic push of green snapshots, adoption of an existing repository,
+`applace push`, and the D13 divergence refusal.
+*Acceptance:* `scripts/m5_acceptance.sh` — an app created in a chat exists on
+GitHub a moment later, with its history; a push made behind Applace's back makes
+the next snapshot refuse.
+
+What M5 learned. **The remote wins is a question git can answer**: `merge-base
+--is-ancestor <remote-head> HEAD` says whether the other side's work is already
+in our history, so a divergence is detected before anything is sent, the refusal
+names the remote sha and the path to rebase, and Applace never force-pushes.
+**A push failure is news, not a failed write**: the push runs after the journal,
+returns a report rather than raising, and a green re-check with nothing to commit
+still pushes — so a refusal caught by a colleague's commit catches up on its own
+once a human reconciles. **The backlog cannot be settled by matching shas**: the
+only way out of a divergence is a rebase, which gives our commits new shas that
+were never recorded as snapshots, so a successful push marks everything
+outstanding — the push having succeeded *is* the proof, and matching on sha left
+apps "one commit behind" forever. And **a machine's git credentials will fight
+you**: the token goes in through an inline credential helper with the machine's
+own helper reset to empty first, because otherwise osxkeychain answers with
+whichever account it remembers and the push is refused as the wrong user.
 
 **M6 — The skill and the policy.** SKILL.md, `get_skill`, `policy.yaml` (D9 and the
 D6 exposure rules), `set_env` and the secret path (D8), and a pass with a small

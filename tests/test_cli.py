@@ -5,11 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import FakeGitHub, connected
 from typer.testing import CliRunner
 
+from applace import github
 from applace.cli import app
 from applace.db import Connection
-from applace.paths import ApplacePaths
+from applace.github import GitHubLink
+from applace.paths import ApplacePaths, paths as applace_paths
 
 runner = CliRunner()
 Home = tuple[ApplacePaths, Connection]
@@ -189,6 +192,87 @@ def test_shot_says_how_to_get_a_browser_when_there_is_none(
     result = runner.invoke(app, ["shot", "shot-app"])
     assert result.exit_code == 1
     assert "playwright install" in result.output
+
+
+def test_github_connect_then_status(home: Home, fake_github: FakeGitHub) -> None:
+    paths, _ = home
+    result = runner.invoke(
+        app,
+        ["github", "connect", "--org", "acme", "--prefix", "lovable-", "--team", "web"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Connected acme" in result.output
+    assert "lovable-<slug>" in result.output
+
+    # The fake lives on localhost, so point the saved connection at it and ask
+    # again: status must report reachability, not just repeat the config.
+    link = github.require(paths)
+    github.save(paths, GitHubLink(**{**link.as_dict(), "api_base": fake_github.api_base}))
+    status = runner.invoke(app, ["github", "status"])
+    assert status.exit_code == 0, status.output
+    assert "acme is reachable" in status.output
+    assert "t0ken-for-tests" not in status.output
+
+
+def test_github_status_with_nothing_connected_is_an_instruction(home: Home) -> None:
+    result = runner.invoke(app, ["github", "status"])
+    assert result.exit_code == 1
+    assert "applace github connect" in result.output
+
+
+def test_github_connect_refuses_a_visibility_that_is_not_one(home: Home) -> None:
+    result = runner.invoke(app, ["github", "connect", "--org", "acme", "--visibility", "open"])
+    assert result.exit_code == 1
+    assert "must be one of" in result.output
+
+
+def test_going_public_asks_a_human_first(home: Home) -> None:
+    """D6: the gate is on exposure, and this is the moment of exposure."""
+    refused = runner.invoke(
+        app, ["github", "connect", "--org", "acme", "--visibility", "public"], input="n\n"
+    )
+    assert refused.exit_code != 0
+    assert "PUBLIC" in refused.output
+    assert github.load(applace_paths()) is None
+
+    accepted = runner.invoke(
+        app, ["github", "connect", "--org", "acme", "--visibility", "public", "--yes"]
+    )
+    assert accepted.exit_code == 0
+    link = github.load(applace_paths())
+    assert link is not None and link.visibility == "public"
+
+
+def test_push_and_adopt_from_the_terminal(home: Home, fake_github: FakeGitHub) -> None:
+    paths, _ = home
+    connected(paths, fake_github)
+    fake_github.create("acme/already-there")
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+
+    adopted = runner.invoke(
+        app, ["github", "adopt", "team-dashboard", "--repo", "acme/already-there"]
+    )
+    assert adopted.exit_code == 0, adopted.output
+    assert "already-there" in adopted.output
+
+    pushed = runner.invoke(app, ["push", "team-dashboard"])
+    assert pushed.exit_code == 0, pushed.output
+    assert "Pushed" in pushed.output
+
+
+def test_push_with_no_repository_exits_nonzero_with_the_reason(home: Home) -> None:
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    result = runner.invoke(app, ["push", "team-dashboard"])
+    assert result.exit_code == 1
+    assert "no GitHub repository" in result.output
+
+
+def test_new_says_where_the_repository_is(home: Home, fake_github: FakeGitHub) -> None:
+    paths, _ = home
+    connected(paths, fake_github)
+    result = runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    assert result.exit_code == 0, result.output
+    assert "github  https://github.test/acme/team-dashboard  (pushed)" in result.output
 
 
 def test_init_reports_the_browser_as_optional(paths: ApplacePaths) -> None:

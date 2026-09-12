@@ -28,12 +28,18 @@ from .apps import (
 from .db import connect, list_apps
 from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable, Shot
 from .gate import GateReport
+from .github import DEFAULT_HOST, DEFAULT_VISIBILITY, VISIBILITIES, GitHubError, GitHubLink
+from .github import api as github_api
+from .github import load as github_load
+from .github import save as github_save
+from .github import token as github_token
 from .init_cmd import InitReport, run_init
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
 from .server import serve as serve_server
 from .stacks import StackError, registry
+from .sync import adopt_app, push_app
 
 app = typer.Typer(
     add_completion=False,
@@ -154,6 +160,9 @@ def new(
     typer.echo(f"  commit  {report.commit[:12]}  ({len(report.files)} files)")
     if report.entry:
         typer.echo(f"  start   {report.entry}")
+    if report.github_url:
+        state = "pushed" if report.pushed else "not pushed yet"
+        typer.echo(f"  github  {report.github_url}  ({state})")
     for warning in report.warnings:
         typer.secho(f"\n{warning}", fg=typer.colors.YELLOW, err=True)
 
@@ -343,6 +352,163 @@ def format_gate(report: GateReport) -> str:
         code = f" [{error.code}]" if error.code else ""
         lines.append(f"  {where}{code} {error.message}" if where else f"  {error.message}{code}")
     return "\n".join(lines)
+
+
+github_app = typer.Typer(
+    add_completion=False,
+    help="The GitHub connection every app follows (D2b).",
+    no_args_is_help=True,
+)
+app.add_typer(github_app, name="github")
+
+
+@github_app.command("connect")
+def github_connect(
+    org: Annotated[str, typer.Option("--org", help="The organisation every app lands in.")],
+    visibility: Annotated[
+        str, typer.Option("--visibility", help="private, internal or public.")
+    ] = DEFAULT_VISIBILITY,
+    prefix: Annotated[
+        str, typer.Option("--prefix", help="Prepended to every repository name.")
+    ] = "",
+    team: Annotated[
+        str | None, typer.Option("--team", help="Team slug to grant write access.")
+    ] = None,
+    host: Annotated[
+        str, typer.Option("--host", help="GitHub Enterprise host, if not github.com.")
+    ] = DEFAULT_HOST,
+    user: Annotated[
+        str | None,
+        typer.Option("--user", help="Which `gh` account to take the token from."),
+    ] = None,
+    api_base: Annotated[
+        str | None,
+        typer.Option(
+            "--api-base",
+            help="Override the REST API root. For an enterprise install that is "
+            "not at /api/v3, and for testing against a stand-in.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
+) -> None:
+    """Answer once where code goes. Every app created afterwards follows it.
+
+    Apps that already exist keep the remote they have: changing this never
+    rewrites a repository behind a developer's back (D2b).
+    """
+    paths = _home()
+    _require_home(paths)
+    if visibility not in VISIBILITIES:
+        typer.secho(
+            f"--visibility must be one of {', '.join(VISIBILITIES)}.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    # D6: making code visible is the gated act. Here it is gated once, at the
+    # only moment a human is definitely present.
+    if visibility == "public" and not yes:
+        typer.confirm(
+            f"Every app Applace creates in {org} will be a PUBLIC repository, "
+            f"readable by anyone on the internet. Continue?",
+            abort=True,
+            default=False,
+        )
+
+    link = GitHubLink(
+        org=org,
+        visibility=visibility,
+        prefix=prefix,
+        team=team,
+        host=host,
+        user=user,
+        api_base=api_base,
+    )
+    github_save(paths, link)
+    typer.echo(f"Connected {org} on {host} ({visibility})")
+    if prefix:
+        typer.echo(f"  repositories will be named {prefix}<slug>")
+    typer.echo(_reachability(link))
+
+
+@github_app.command("status")
+def github_status() -> None:
+    """What Applace would do with the next app, and whether it can."""
+    paths = _home()
+    _require_home(paths)
+    link = github_load(paths)
+    if link is None:
+        typer.echo(
+            "No organisation connected. `applace github connect --org <org>` "
+            "makes every new app a repository."
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"{link.org} on {link.host} ({link.visibility})")
+    typer.echo(f"  api     {link.api}")
+    if link.prefix:
+        typer.echo(f"  prefix  {link.prefix}")
+    if link.team:
+        typer.echo(f"  team    {link.team}")
+    typer.echo(f"  {_reachability(link)}")
+
+
+def _reachability(link: GitHubLink) -> str:
+    """Say whether the token exists and the organisation answers, without
+    printing the token or failing the command over it."""
+    try:
+        auth = github_token(link)
+    except GitHubError as exc:
+        return str(exc)
+    status, body = github_api(link, "GET", f"/orgs/{link.org}", auth=auth)
+    if status == 200:
+        return f"token ok, {link.org} is reachable"
+    if status == 404:
+        return f"the token works but cannot see an organisation called {link.org}"
+    return f"GitHub answered {status}: {body.get('message', 'no detail')}"
+
+
+@github_app.command("adopt")
+def github_adopt(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    repo: Annotated[str, typer.Option("--repo", help="owner/name of the repository.")],
+) -> None:
+    """Point an existing app at a repository that already exists."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        repository = adopt_app(paths, conn, row, repo)
+    except (AppError, GitHubError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"{name} -> {repository.html_url}")
+    typer.echo(f"  `applace push {name}` sends its history there")
+
+
+@app.command()
+def push(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+) -> None:
+    """Push the app's commits to GitHub. Never forced (D13)."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        report = push_app(paths, conn, row)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if report.pushed:
+        typer.echo(f"Pushed {report.commit[:12] if report.commit else ''} to {report.github_url}")
+        return
+    typer.secho(report.reason, fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command()
