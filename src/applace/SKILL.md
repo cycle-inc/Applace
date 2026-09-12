@@ -24,7 +24,8 @@ never run `git`, and never edit files outside the app.
    holds the real tool's message with a file and a line. Fix and call again.
 6. `screenshot_app { app }` — look at the page. A build going green and a page
    rendering are two different facts.
-7. Tell the human the preview URL and the GitHub URL.
+7. Tell the human the preview URL and the GitHub URL — or just tell them to run
+   `applace open <app>`, which opens whichever of them the app has.
 8. `deploy_app { app }` when they want an address rather than a dev server.
 
 ## Rules that will save you a round trip
@@ -45,6 +46,11 @@ never run `git`, and never edit files outside the app.
   install, is reported, and may be refused by this machine's policy. React,
   the router and the styling are already there. Check `package.json` before
   reaching for a library.
+- **A human may be in the repository too.** `get_app` reports `human`: commits
+  somebody made by hand, and files they are editing right now. `write_files`
+  replaces whole files, so it refuses to write one with uncommitted changes
+  that Applace did not make — that is `stage: "handover"`, and it is not a bug
+  to fix. Tell the human which file you need and let them commit or discard.
 - **Never write a secret into source.** A browser bundle is public. Use
   `set_env` (below).
 - **Do not touch** `node_modules/`, `dist/`, `.git/`, `package-lock.json`, or
@@ -173,6 +179,12 @@ turn it off. In a `write_files` result, `github.pushed` says whether the commit
 landed. `github.diverged: true` means a human pushed to the repository and
 Applace refused to overwrite them — **say this to the human**, verbatim, and
 stop. Do not try to work around it.
+
+Some machines review. `get_skill` says so, and then `github.reviewed` is true
+in every write result: your commits go to a branch of this app's own and
+`github.pull_request_url` is a pull request waiting for a person. Give them
+that URL. Merging it is their decision and not part of your task — keep
+working on the same branch, the pull request updates itself.
 
 ## Shipping it
 

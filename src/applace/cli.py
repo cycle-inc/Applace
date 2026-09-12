@@ -37,7 +37,15 @@ from .deploy import Report as DeployReport
 from .deploy import describe as describe_deployments
 from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable, Shot
 from .gate import GateReport
-from .github import DEFAULT_HOST, DEFAULT_VISIBILITY, VISIBILITIES, GitHubError, GitHubLink
+from .github import (
+    DEFAULT_HOST,
+    DEFAULT_VISIBILITY,
+    DIRECT,
+    REVIEWS,
+    VISIBILITIES,
+    GitHubError,
+    GitHubLink,
+)
 from .github import api as github_api
 from .github import load as github_load
 from .github import save as github_save
@@ -697,6 +705,14 @@ def github_connect(
         str | None,
         typer.Option("--user", help="Which `gh` account to take the token from."),
     ] = None,
+    review: Annotated[
+        str,
+        typer.Option(
+            "--review",
+            help="direct: push to the default branch. pr: push to a branch per "
+            "app and keep a pull request open against it (D15).",
+        ),
+    ] = DIRECT,
     api_base: Annotated[
         str | None,
         typer.Option(
@@ -717,6 +733,13 @@ def github_connect(
     if visibility not in VISIBILITIES:
         typer.secho(
             f"--visibility must be one of {', '.join(VISIBILITIES)}.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if review not in REVIEWS:
+        typer.secho(
+            f"--review must be one of {', '.join(REVIEWS)}.",
             fg=typer.colors.RED,
             err=True,
         )
@@ -753,12 +776,17 @@ def github_connect(
         team=team,
         host=host,
         user=user,
+        review=review,
         api_base=api_base,
     )
     github_save(paths, link)
     typer.echo(f"Connected {org} on {host} ({visibility})")
     if prefix:
         typer.echo(f"  repositories will be named {prefix}<slug>")
+    if link.reviewed:
+        typer.echo(
+            "  every app pushes to applace/<slug> and keeps a pull request open"
+        )
     typer.echo(_reachability(link))
 
 
@@ -780,6 +808,11 @@ def github_status() -> None:
         typer.echo(f"  prefix  {link.prefix}")
     if link.team:
         typer.echo(f"  team    {link.team}")
+    typer.echo(
+        "  review  a pull request per app, against the default branch"
+        if link.reviewed
+        else "  review  none: green commits go straight to the default branch"
+    )
     typer.echo(f"  {_reachability(link)}")
 
 
@@ -899,10 +932,116 @@ def push(
     finally:
         conn.close()
     if report.pushed:
-        typer.echo(f"Pushed {report.commit[:12] if report.commit else ''} to {report.github_url}")
+        typer.echo(
+            f"Pushed {report.commit[:12] if report.commit else ''} to "
+            f"{report.github_url} ({report.branch})"
+        )
+        if report.pull_request is not None:
+            verb = "Opened" if report.pull_request.created else "Updated"
+            typer.echo(f"  {verb} #{report.pull_request.number} {report.pull_request.html_url}")
+        elif report.reason:
+            typer.echo(f"  {report.reason}")
         return
     typer.secho(report.reason, fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
+
+
+# In the order `applace open` tries them, which is "the most finished thing
+# this app has": a production URL beats a preview deployment, which beats a dev
+# server on this laptop, which beats the repository it all came from.
+OPENABLE = ("live", "preview", "repo", "dir")
+
+
+@app.command("open")
+def open_command(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    what: Annotated[
+        str | None,
+        typer.Option(
+            "--what",
+            "-w",
+            help="live, preview, repo or dir. The default is the first of those "
+            "this app has.",
+        ),
+    ] = None,
+    show: Annotated[
+        bool,
+        typer.Option("--print", help="Print the target instead of opening it."),
+    ] = False,
+) -> None:
+    """Open the app -- what is live, the preview, the repository, the directory.
+
+    This is the handover command. An agent hands back URLs in a chat window; a
+    human wants the thing itself, and typing `applace open billing-portal` is
+    shorter than finding which of four addresses the app currently has.
+    """
+    paths = _home()
+    _require_home(paths)
+    if what is not None and what not in OPENABLE:
+        typer.secho(
+            f"--what must be one of {', '.join(OPENABLE)}.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        detail = app_detail(paths, conn, row)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    targets = _openable(detail)
+    if what is not None:
+        target = targets.get(what)
+        if target is None:
+            typer.secho(
+                f"{name} has no {what} to open. It has: "
+                f"{', '.join(targets) or 'nothing yet'}.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        kind = what
+    else:
+        kind, target = next(
+            ((key, targets[key]) for key in OPENABLE if key in targets),
+            ("", ""),
+        )
+        if not target:  # pragma: no cover - every app has a directory
+            typer.secho(f"{name} has nothing to open.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+    typer.echo(f"{kind:<8} {target}")
+    if not show:
+        typer.launch(target)
+
+
+def _openable(detail: dict[str, object]) -> dict[str, str]:
+    """The addresses an app has right now, keyed by what they are."""
+    out: dict[str, str] = {}
+    deployments = detail.get("deployments")
+    live = [
+        entry
+        for entry in (deployments if isinstance(deployments, list) else [])
+        if entry.get("status") == "live" and entry.get("url")
+    ]
+    production = next(
+        (entry for entry in live if entry.get("environment") == "production"), None
+    )
+    if production is not None:
+        out["live"] = str(production["url"])
+    elif live:
+        out["live"] = str(live[0]["url"])
+    running = detail.get("preview")
+    if isinstance(running, dict) and running.get("url"):
+        out["preview"] = str(running["url"])
+    if detail.get("github_url"):
+        out["repo"] = str(detail["github_url"])
+    if detail.get("path"):
+        out["dir"] = str(detail["path"])
+    return out
 
 
 @app.command()

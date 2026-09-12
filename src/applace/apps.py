@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import deploy, env, eyes, github, gitrepo, preview, shell
+from . import deploy, env, eyes, github, gitrepo, handover, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
@@ -265,6 +265,10 @@ def app_detail(
     # Commits that are here and not known to be on GitHub. Non-zero means a push
     # was refused or the machine was offline, and the next one carries them all.
     detail["unpushed"] = len(unpushed(conn, str(row["id"])))
+    # What a human has done here that Applace did not (M9). An app is a
+    # repository a person is invited to open, so "somebody else has been in
+    # here" is a state the agent has to be told about before it writes.
+    detail["human"] = handover.survey(conn, row).as_dict()
     detail.update(outstanding(conn, str(row["id"])))
     live = preview.status(conn, str(row["id"]), str(row["slug"]), path)
     detail["preview"] = live.as_dict() if live is not None else None

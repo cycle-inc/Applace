@@ -1,4 +1,4 @@
-"""Keeping an app and its GitHub repository the same thing (D2, D13).
+"""Keeping an app and its GitHub repository the same thing (D2, D13, D15).
 
 The rule this module exists to enforce is D13: **the remote wins**. If someone
 else pushed -- a human, another machine -- the snapshot is refused and the
@@ -9,6 +9,13 @@ rather than a colleague's work overwritten, which is not.
 The second rule is that a push failure never undoes a green gate. The commit is
 already made; whether it reached GitHub is a separate fact, recorded separately,
 and retried by the next push.
+
+The third is D15, and it is what makes this harness usable by a team that does
+not merge machine-written code unread: when the connection says ``review: pr``,
+green commits go to the app's own branch and one pull request stays open against
+the default branch. Nothing else changes -- same repository, same commits, same
+refusal to force -- and the default branch becomes what a human merged, which is
+also what Vercel calls production (D12).
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ from typing import Any
 
 from . import github, gitrepo
 from .db import Connection, mark_pushed, set_github, unpushed
-from .github import GitHubError, GitHubLink, NotConnected, Repository
+from .github import GitHubError, GitHubLink, NotConnected, PullRequest, Repository
 from .paths import ApplacePaths
 
 DIVERGED = (
@@ -27,6 +34,19 @@ DIVERGED = (
     "is not in the local history. Applace never force-pushes (D13). Pull or "
     "rebase the app at {path}, then push again."
 )
+
+PR_TITLE = "{name}, built with Applace"
+PR_BODY = """\
+This branch is where Applace pushes `{app}`. Every commit on it passed the gate
+on the machine that made it: type-checked, linted and built before it was
+committed (D3, D4).
+
+Review it as you would any branch. Merging is what puts this work on `{base}`,
+and on `{base}` is what production means (D12). The branch stays; the next green
+change lands on it and this pull request comes back.
+
+The app is an ordinary repository -- `git checkout {head}` and run it.
+"""
 
 
 @dataclass
@@ -41,9 +61,14 @@ class PushReport:
     diverged: bool = False
     remote_commit: str | None = None
     behind: int = 0
+    # Set when the connection reviews work (D15). `pull_request` is None on a
+    # branch with nothing new on it, which is the state after a human merged.
+    reviewed: bool = False
+    base: str | None = None
+    pull_request: PullRequest | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "pushed": self.pushed,
             "repo": self.repo,
             "github_url": self.github_url,
@@ -54,6 +79,16 @@ class PushReport:
             "remote_commit": self.remote_commit,
             "unpushed": self.behind,
         }
+        if self.reviewed:
+            out["reviewed"] = True
+            out["base"] = self.base
+            out["pull_request"] = (
+                self.pull_request.as_dict() if self.pull_request is not None else None
+            )
+            out["pull_request_url"] = (
+                self.pull_request.html_url if self.pull_request is not None else None
+            )
+        return out
 
 
 def connect_app(
@@ -115,13 +150,13 @@ def push_app(paths: ApplacePaths, conn: Connection, row: Any) -> PushReport:
     """
     app = str(row["slug"])
     root = Path(str(row["path"]))
-    branch = str(row["default_branch"] or gitrepo.DEFAULT_BRANCH)
+    base = str(row["default_branch"] or gitrepo.DEFAULT_BRANCH)
     report = PushReport(
         app=app,
         pushed=False,
         repo=row["github_repo"],
         github_url=row["github_url"],
-        branch=branch,
+        branch=base,
         behind=len(unpushed(conn, str(row["id"]))),
     )
 
@@ -143,6 +178,25 @@ def push_app(paths: ApplacePaths, conn: Connection, row: Any) -> PushReport:
         report.reason = str(exc)
         return report
 
+    branch = base
+    if link.reviewed:
+        report.reviewed = True
+        report.base = base
+        try:
+            # A pull request needs a base branch to exist, and a repository
+            # Applace has just created has no branches at all. The birth commit
+            # goes to the default branch for that reason, and everything after
+            # it is proposed rather than pushed.
+            born = gitrepo.fetch(root, url, base, token=token) is not None
+        except gitrepo.GitError as exc:
+            report.reason = str(exc)
+            return report
+        if born:
+            branch = link.work_branch(app)
+        else:
+            report.reviewed = False
+
+    report.branch = branch
     try:
         remote_head = gitrepo.fetch(root, url, branch, token=token)
         if remote_head and not gitrepo.contains(root, remote_head):
@@ -163,4 +217,40 @@ def push_app(paths: ApplacePaths, conn: Connection, row: Any) -> PushReport:
     report.pushed = True
     report.commit = local_head.sha
     report.behind = 0
+
+    if report.reviewed:
+        _propose(link, report, row, head=branch, base=base)
     return report
+
+
+def _propose(
+    link: GitHubLink, report: PushReport, row: Any, *, head: str, base: str
+) -> None:
+    """Open the app's pull request, or find the one already open (D15).
+
+    Never fatal. The commits are on GitHub either way, and an organisation that
+    forbids pull requests from this token has a configuration problem, not a
+    lost piece of work -- so it comes back as a sentence next to a successful
+    push.
+    """
+    full_name = str(report.repo)
+    try:
+        report.pull_request = github.open_pull_request(
+            link,
+            full_name,
+            head=head,
+            base=base,
+            title=PR_TITLE.format(name=str(row["name"])),
+            body=PR_BODY.format(app=str(row["slug"]), base=base, head=head),
+        )
+    except GitHubError as exc:
+        report.reason = (
+            f"the commits are on {full_name} at {head}, but the pull request "
+            f"could not be opened: {exc}"
+        )
+        return
+    if report.pull_request is None:
+        report.reason = (
+            f"{head} holds nothing that {base} does not, so there is nothing to "
+            f"propose yet."
+        )

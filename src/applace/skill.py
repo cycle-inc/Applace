@@ -38,20 +38,7 @@ def describe(paths: ApplacePaths) -> dict[str, Any]:
         out["stacks"] = []
         out["warning"] = str(exc)
 
-    link = github.load(paths)
-    out["github"] = (
-        {
-            "org": link.org,
-            "host": link.host,
-            "visibility": link.visibility,
-            "note": (
-                f"every app created here becomes a {link.visibility} repository "
-                f"in {link.org}, and every green write is pushed to it"
-            ),
-        }
-        if link is not None
-        else None
-    )
+    out["github"] = _github(paths)
 
     production = policy.DEFAULT_RULE
     try:
@@ -76,6 +63,30 @@ def describe(paths: ApplacePaths) -> dict[str, Any]:
         ),
     }
     return out
+
+
+def _github(paths: ApplacePaths) -> dict[str, Any] | None:
+    """Where code lands, and whether a human sees it before the default branch does."""
+    link = github.load(paths)
+    if link is None:
+        return None
+    note = (
+        f"every app created here becomes a {link.visibility} repository in "
+        f"{link.org}, and every green write is pushed to it"
+    )
+    if link.reviewed:
+        note += (
+            ". This machine reviews: commits go to a branch of the app's own and "
+            "one pull request stays open against the default branch, so say the "
+            "pull request URL to the human -- merging is theirs to do"
+        )
+    return {
+        "org": link.org,
+        "host": link.host,
+        "visibility": link.visibility,
+        "review": link.review,
+        "note": note,
+    }
 
 
 __all__ = ["describe", "text"]

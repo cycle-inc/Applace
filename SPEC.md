@@ -9,7 +9,8 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M8 are shipped.** M9 is next and is not yet built.
+> **Status: M1 to M9 are shipped.** Every milestone in this document is built,
+> tested and accepted; what comes next is a v2 question.
 
 ## What v1 is
 
@@ -60,6 +61,7 @@ Three things, and they are the whole product:
 | **D12** | **Vercel deploys through GitHub, not through an upload.** The Vercel project is linked to the app's repository: a branch gives a preview URL, `main` gives production. `deploy_app` establishes the link, triggers the build and waits for its outcome; it never bypasses the repository. A direct-upload fallback exists only for apps with no GitHub connection. |
 | **D13** | **The remote wins.** If the GitHub repository has moved ahead of the local tree — a human pushed, another machine pushed — the snapshot is refused and the divergence is reported. Applace never force-pushes and never rewrites history. |
 | **D14** | **v1 apps are front ends.** A generated app is a browser application that talks to APIs that already exist; the stack supplies the client and the base URL. No database, no server runtime, no BaaS. A full-stack stack is a v2 question and is not to be anticipated in v1 code. |
+| **D15** | **A handover is a branch and a pull request, not a different repository.** A machine can be connected in review mode: every app's commits go to `applace/<slug>` and one pull request stays open against the default branch, so nothing an agent wrote reaches `main` without a person merging it. The agent is given the pull request URL and told to hand it over; it never merges, and there is no Applace command that does. The mirror of it holds too: a person's uncommitted edit in the working tree refuses the agent's write, because `write_files` replaces whole files and theirs exists nowhere else. |
 
 ## Directory layout (user machine)
 
@@ -373,6 +375,41 @@ in none. Installing a stack stays a human act with no MCP tool behind it, for th
 same reason `github connect` has none: it decides what every future app is made
 of.
 
-**M9 — Handover.** Opening a pull request instead of pushing to `main`, detecting a
-human's own edits in the working tree, `applace open`, `uvx applace` packaging and
-the public README.
+**M9 — Handover.** *Shipped.* `github connect --review pr` (D15): commits go to
+`applace/<slug>` and one pull request stays open against the default branch;
+`handover.survey` telling an agent about a human's commits and refusing to write
+over a human's uncommitted edits (`stage: "handover"`); `applace open`; and the
+packaging that makes `uvx applace` a real install.
+*Acceptance:* `scripts/m9_acceptance.sh` — against a GitHub on localhost whose
+repositories are real bare repositories, a real app's green writes land on
+`applace/review-me` behind one pull request while `main` does not move, a person
+merges it and the catch-up push says there is nothing to propose, a person's
+uncommitted edit refuses the agent's write with their bytes intact while a write
+elsewhere still goes green and carries their wording, a person's commit is
+reported as news and not as a refusal, `applace open --print` names the preview,
+the repository and the directory, and the built wheel — run through `uvx` from a
+directory with no checkout in it — initialises a home that already knows
+`vite-react-ts` and prints SKILL.md.
+
+What M9 learned. **The refusal has to be per path, not per repository.** A
+harness that stopped because *any* file was dirty would be one nobody leaves
+running: an agent editing `src/Chart.tsx` while a person edits `README.md` is not
+a conflict, so `guard` intersects the write's own targets with what is
+outstanding. **Telling a human's mess from the agent's own is the whole
+problem**, and D4 is what makes it hard: a red gate leaves broken files on disk
+on purpose, so those paths are dirty for a reason that has nothing to do with a
+person — and suppressing *everything* after a red write would have let the agent
+overwrite a real edit to a different file. The answer is the union of
+`written_json` over the consecutive red gates since the last green one, which is
+why `db.recent_gates` exists. **Order decides who gets blamed**: surveying before
+the journal is written mislabels the agent's own red files as somebody's work, so
+the tail survey runs after `_journal` and after the commit, while the refusal
+branch surveys before it. **Review mode cannot open a pull request against a
+branch that does not exist yet**, so the birth commit still goes to the default
+branch and only the app's second commit onwards is proposed — and a pull request
+that cannot be opened (a 422, a token without the scope) is reported, never
+fatal: the commits are already pushed and a human can open it by hand.
+**`applace open` is the sentence an agent cannot say.** The agent hands back URLs
+in a chat window; the person wants the thing itself, and which of four addresses
+an app currently has is a question the journal can answer and a human should not
+have to.

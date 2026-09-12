@@ -25,19 +25,30 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M8 are shipped**: the store (apps as git repositories), the compiler
+**M1 to M9 are shipped** — every milestone in the spec: the store (apps as git
+repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
 real browser, its console and its failed requests), GitHub (every new app is a
 repository in your organisation, and every green snapshot is pushed there), the
 skill (the document an agent reads, the dependency policy, and the secret path),
 deployment (a commit served from this machine or shipped to Vercel through its
-own repository, with production gated on a human), and company stacks (installed
-from git, pinned to a commit, with the drift reported rather than applied). The
-handover to a human is next. The milestone list in [SPEC.md](SPEC.md) is the
-roadmap, and it is followed in order.
+own repository, with production gated on a human), company stacks (installed
+from git, pinned to a commit, with the drift reported rather than applied), and
+the handover (a pull request a person merges, a refusal to write over what they
+are editing, and `applace open`). [SPEC.md](SPEC.md) records why each of those
+is the way it is, and what each milestone taught.
 
 ### Try it
+
+Applace runs from the package, with no checkout of this repository:
+
+```bash
+uvx --from git+https://github.com/cycle-inc/Applace applace init
+uvx --from git+https://github.com/cycle-inc/Applace applace new "Team Dashboard"
+```
+
+From a checkout, which is what the rest of this README shows:
 
 ```bash
 uv sync
@@ -84,6 +95,39 @@ uv run applace github adopt team-dashboard --repo acme/dash   # an existing repo
 
 If someone else pushed first, the push is refused and says where the remote is:
 Applace never force-pushes. Rebase the app, then `applace push` again.
+
+### Hand it to a human
+
+Connect the machine in review mode and nothing an agent wrote reaches the
+default branch without somebody merging it:
+
+```bash
+uv run applace github connect --org acme --review pr
+```
+
+Every app then commits to `applace/<slug>` and keeps **one** pull request open
+against `main`. The agent is given the URL and told to say it out loud; merging
+is yours, and there is no Applace command that does it for you.
+
+The same courtesy runs the other way. An app is a repository you are invited to
+open, so Applace records every commit it makes itself and can therefore tell
+your work from its own:
+
+- **Your commits are news.** `get_app` reports them and the agent is told to
+  read those files before it changes them. Nothing is blocked.
+- **Your uncommitted edits are a refusal.** `write_files` replaces whole files,
+  so a write onto a file you are in the middle of editing comes back as
+  `stage: "handover"` with your bytes untouched, and the agent is told to ask
+  you rather than to retry. A write to a *different* file still goes through.
+  `applace check <app>` commits what you left behind, once it builds.
+
+And when the agent is done, the human end of the handover is one command:
+
+```bash
+uv run applace open team-dashboard              # live, else preview, else repo, else dir
+uv run applace open team-dashboard --what repo
+uv run applace open team-dashboard --print      # just say the address
+```
 
 ### Your own stack
 
@@ -205,7 +249,8 @@ Decisions are locked before code and recorded in [SPEC.md](SPEC.md) — that an
 app is an ordinary repository (D1), that versioning is git and the remote is
 GitHub (D2), that `write_files` is a compiler (D3), that a red write is accepted
 but not committed (D4), that the gate is on exposure rather than on writing
-(D6), that secrets never enter the model's context (D8). Read that document
+(D6), that secrets never enter the model's context (D8), that a handover is a
+branch and a pull request rather than a different repository (D15). Read that document
 before changing behaviour; it is also the roadmap.
 
 ### License

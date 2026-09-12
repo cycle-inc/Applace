@@ -325,6 +325,16 @@ def latest_gate(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None:
     ).fetchone()
 
 
+def recent_gates(conn: sqlite3.Connection, app_id: str, limit: int = 20) -> list[sqlite3.Row]:
+    """The last gates, newest first. Same ordering caveat as `latest_gate`."""
+    return list(
+        conn.execute(
+            "SELECT * FROM gates WHERE app_id = ? ORDER BY rowid DESC LIMIT ?",
+            (app_id, limit),
+        )
+    )
+
+
 def latest_snapshot(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None:
     """The last commit Applace made.
 

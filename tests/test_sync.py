@@ -305,3 +305,147 @@ def test_the_push_never_fails_the_write(home: Home, fake_github: FakeGitHub) -> 
     assert report.committed is True
     assert report.push is not None and report.push.pushed is False
     assert report.push.reason
+
+
+# -- review: a branch and a pull request instead of the default branch (D15) --
+
+
+def test_the_birth_commit_creates_the_default_branch_even_when_work_is_reviewed(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    """A pull request needs a base, and a new repository has no branches at all."""
+    paths, conn = home
+    connected(paths, fake_github, review=github.REVIEW)
+    create_app(paths, conn, name="Team Dashboard", stack_name="fake", install=False)
+
+    bare = fake_github.bare("acme/team-dashboard")
+    root = paths.app("team-dashboard")
+    assert bare_head(bare, "main") == gitrepo.head(root).sha
+    assert bare_head(bare, "applace/team-dashboard") is None
+    assert fake_github.pulls == []
+
+
+def test_a_green_write_lands_on_a_branch_and_opens_one_pull_request(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    paths, conn = home
+    connected(paths, fake_github, review=github.REVIEW)
+    create_app(paths, conn, name="Team Dashboard", stack_name="fake", install=False)
+    born = bare_head(fake_github.bare("acme/team-dashboard"), "main")
+
+    first = gate.write_files(
+        paths, conn, app="team-dashboard",
+        files_to_write={"src/page.txt": "one\n"}, message="A page",
+    )
+    assert first.push is not None and first.push.pushed is True
+    assert first.push.branch == "applace/team-dashboard"
+    assert first.push.pull_request is not None
+    assert first.push.pull_request.created is True
+    assert first.push.as_dict()["pull_request_url"].endswith("/pull/1")
+
+    bare = fake_github.bare("acme/team-dashboard")
+    assert bare_head(bare, "applace/team-dashboard") == first.commit
+    # Main is untouched: nothing reached it without a human (D15).
+    assert bare_head(bare, "main") == born
+
+    # A second write goes to the same branch and reuses the same pull request.
+    second = gate.write_files(
+        paths, conn, app="team-dashboard",
+        files_to_write={"src/page.txt": "two\n"}, message="More",
+    )
+    assert second.push is not None and second.push.pull_request is not None
+    assert second.push.pull_request.number == 1
+    assert second.push.pull_request.created is False
+    assert len(fake_github.open_pulls("acme/team-dashboard")) == 1
+    assert bare_head(bare, "applace/team-dashboard") == second.commit
+
+
+def test_after_a_human_merges_the_next_write_opens_the_next_pull_request(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    paths, conn = home
+    connected(paths, fake_github, review=github.REVIEW)
+    create_app(paths, conn, name="Team Dashboard", stack_name="fake", install=False)
+    gate.write_files(
+        paths, conn, app="team-dashboard", files_to_write={"src/page.txt": "one\n"}
+    )
+    fake_github.merge("acme/team-dashboard", 1)
+
+    # Nothing new to propose: the branch and main are the same commit now.
+    caught_up = sync.push_app(paths, conn, require_app(conn, "team-dashboard"))
+    assert caught_up.pushed is True
+    assert caught_up.pull_request is None
+    assert "nothing to propose" in caught_up.reason
+
+    after = gate.write_files(
+        paths, conn, app="team-dashboard", files_to_write={"src/page.txt": "two\n"}
+    )
+    assert after.push is not None and after.push.pull_request is not None
+    assert after.push.pull_request.number == 2
+    assert len(fake_github.open_pulls("acme/team-dashboard")) == 1
+
+
+def test_a_pull_request_that_cannot_be_opened_does_not_lose_the_commits(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    paths, conn = home
+    connected(paths, fake_github, review=github.REVIEW)
+    create_app(paths, conn, name="Team Dashboard", stack_name="fake", install=False)
+    fake_github.refuse_pulls = "Pull requests are disabled for this repository"
+
+    report = gate.write_files(
+        paths, conn, app="team-dashboard", files_to_write={"src/page.txt": "one\n"}
+    )
+    assert report.ok is True
+    assert report.push is not None and report.push.pushed is True
+    assert report.push.pull_request is None
+    assert "could not be opened" in report.push.reason
+    assert bare_head(
+        fake_github.bare("acme/team-dashboard"), "applace/team-dashboard"
+    ) == report.commit
+
+
+def test_the_remote_still_wins_on_the_work_branch(
+    home: Home, fake_github: FakeGitHub, tmp_path: Path
+) -> None:
+    """D13 is about whichever branch we are pushing to, not about main."""
+    paths, conn = home
+    connected(paths, fake_github, review=github.REVIEW)
+    create_app(paths, conn, name="Team Dashboard", stack_name="fake", install=False)
+    gate.write_files(
+        paths, conn, app="team-dashboard", files_to_write={"src/page.txt": "one\n"}
+    )
+
+    bare = fake_github.bare("acme/team-dashboard")
+    elsewhere = tmp_path / "reviewer"
+    subprocess.run(
+        ["git", "clone", "--branch", "applace/team-dashboard", str(bare), str(elsewhere)],
+        check=True, capture_output=True,
+    )
+    (elsewhere / "THEIRS.md").write_text("a fix in review\n", encoding="utf-8")
+    for command in (
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=they@example.com", "-c", "user.name=They",
+         "commit", "-m", "Fix it for them"],
+        ["git", "push"],
+    ):
+        subprocess.run(command, cwd=elsewhere, check=True, capture_output=True)
+    theirs = bare_head(bare, "applace/team-dashboard")
+
+    report = gate.write_files(
+        paths, conn, app="team-dashboard", files_to_write={"src/page.txt": "two\n"}
+    )
+    assert report.ok is True
+    assert report.push is not None and report.push.pushed is False
+    assert report.push.diverged is True
+    assert bare_head(bare, "applace/team-dashboard") == theirs
+
+
+def test_the_skill_says_this_machine_reviews(home: Home, fake_github: FakeGitHub) -> None:
+    from applace import skill
+
+    paths, _ = home
+    connected(paths, fake_github, review=github.REVIEW)
+    described = skill.describe(paths)
+    assert described["github"]["review"] == "pr"
+    assert "pull request" in described["github"]["note"]

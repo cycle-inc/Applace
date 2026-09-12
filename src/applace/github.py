@@ -27,6 +27,16 @@ from .paths import ApplacePaths
 DEFAULT_HOST = "github.com"
 DEFAULT_VISIBILITY = "private"
 VISIBILITIES = ("private", "internal", "public")
+
+# How an app's work reaches its default branch (M9). `direct` pushes to it;
+# `pr` pushes to a branch of the app's own and opens one pull request that stays
+# open while the agent works. It is an organisation-level answer like the rest of
+# the connection (D2b): a team that reviews machine-written code reviews all of
+# it, and an agent is not asked to decide whether its work needs looking at.
+DIRECT = "direct"
+REVIEW = "pr"
+REVIEWS = (DIRECT, REVIEW)
+WORK_BRANCH = "applace/{slug}"
 API_VERSION = "2022-11-28"
 TIMEOUT = 30.0
 
@@ -58,6 +68,7 @@ class GitHubLink:
     team: str | None = None
     host: str = DEFAULT_HOST
     user: str | None = None
+    review: str = DIRECT
     # Only set by tests and by an unusual enterprise layout; derived otherwise.
     api_base: str | None = None
 
@@ -69,8 +80,21 @@ class GitHubLink:
             "team": self.team,
             "host": self.host,
             "user": self.user,
+            "review": self.review,
             "api_base": self.api_base,
         }
+
+    @property
+    def reviewed(self) -> bool:
+        return self.review == REVIEW
+
+    def work_branch(self, slug: str) -> str:
+        """The branch an app's commits are pushed to when work is reviewed.
+
+        One branch per app, reused: an agent's session is not a unit anybody
+        reviews, and a new branch per write would be a pull request per write.
+        """
+        return WORK_BRANCH.format(slug=slug)
 
     @property
     def api(self) -> str:
@@ -273,6 +297,109 @@ def create_repository(
     if link.team:
         grant_team(link, repository.full_name, auth=auth)
     return repository
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    html_url: str
+    state: str
+    title: str
+    head: str
+    base: str
+    # False when Applace found one already open rather than opening it.
+    created: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "number": self.number,
+            "url": self.html_url,
+            "state": self.state,
+            "title": self.title,
+            "head": self.head,
+            "base": self.base,
+            "created": self.created,
+        }
+
+
+def find_pull_request(
+    link: GitHubLink,
+    full_name: str,
+    *,
+    head: str,
+    base: str,
+    auth: str | None = None,
+) -> PullRequest | None:
+    """The open pull request for this branch, if there is one."""
+    owner = full_name.split("/", 1)[0]
+    status, body = api(
+        link,
+        "GET",
+        f"/repos/{full_name}/pulls?state=open&head={owner}:{head}&base={base}",
+        auth=auth,
+    )
+    if status >= 400:
+        raise GitHubError(_message(body, f"GitHub refused to list {full_name}'s pull requests"))
+    found = body.get("data") if isinstance(body.get("data"), list) else []
+    if not found:
+        return None
+    return _pull_request(found[0], created=False)
+
+
+def open_pull_request(
+    link: GitHubLink,
+    full_name: str,
+    *,
+    head: str,
+    base: str,
+    title: str,
+    body: str = "",
+    auth: str | None = None,
+) -> PullRequest | None:
+    """Open a pull request, or hand back the one that is already open.
+
+    None means there was nothing to propose: the branch and the base are the
+    same commit, which is the normal state right after a human merged. That is
+    an answer, not a failure -- the next green write opens the next one.
+    """
+    auth = auth or token(link)
+    existing = find_pull_request(link, full_name, head=head, base=base, auth=auth)
+    if existing is not None:
+        return existing
+    status, payload = api(
+        link,
+        "POST",
+        f"/repos/{full_name}/pulls",
+        {"title": title, "head": head, "base": base, "body": body},
+        auth=auth,
+    )
+    if status in (200, 201):
+        return _pull_request(payload, created=True)
+    if status == 422:
+        detail = _message(payload, "")
+        if "No commits between" in detail:
+            return None
+        # A pull request that exists but was not found above -- a race, or a
+        # different base. GitHub names it in the error; look once more.
+        again = find_pull_request(link, full_name, head=head, base=base, auth=auth)
+        if again is not None:
+            return again
+        raise GitHubError(_message(payload, f"GitHub refused to open a pull request on {full_name}"))
+    raise GitHubError(_message(payload, f"GitHub refused to open a pull request on {full_name}"))
+
+
+def _pull_request(body: dict[str, Any], *, created: bool) -> PullRequest:
+    head = body.get("head") if isinstance(body.get("head"), dict) else {}
+    base = body.get("base") if isinstance(body.get("base"), dict) else {}
+    return PullRequest(
+        number=int(body.get("number") or 0),
+        html_url=str(body.get("html_url") or ""),
+        state=str(body.get("state") or "open"),
+        title=str(body.get("title") or ""),
+        head=str((head or {}).get("ref") or ""),
+        base=str((base or {}).get("ref") or ""),
+        created=created,
+    )
 
 
 def grant_team(link: GitHubLink, full_name: str, *, auth: str | None = None) -> bool:

@@ -162,6 +162,10 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         `files` is the repository's tracked files -- dependencies and build
         output are excluded, so this is the app itself and nothing else.
 
+        `human` is what somebody did here that Applace did not: commits they
+        made by hand, and files they have open right now. Read those files
+        before you touch them; `write_files` will refuse to overwrite them.
+
         On failure `code` is unknown-app.
         """
         with session() as conn:
@@ -292,10 +296,15 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         `new_deps` lists dependencies your change added: adding one costs an
         install, so prefer what the stack already has.
 
+        `stage: "handover"` means a human has uncommitted changes in a file you
+        tried to write. Nothing was written. Tell them which file you need and
+        let them commit or discard -- that decision is not yours to make.
+
         When the app has a GitHub repository, `github` says whether the commit
         reached it. `github.diverged` true means someone else pushed and Applace
         refused rather than overwrite them -- say so to the human, do not try to
-        work around it.
+        work around it. On a machine that reviews, `github.pull_request_url` is
+        the pull request holding your work; give it to the human.
 
         Call this with no `files` to re-check an app that is already dirty, or to
         retry a push that was refused.

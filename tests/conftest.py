@@ -102,9 +102,11 @@ class FakeGitHub:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.repos: dict[str, dict[str, Any]] = {}
+        self.pulls: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str]] = []
         self.tokens: list[str] = []
         self.refuse_creation: str | None = None
+        self.refuse_pulls: str | None = None
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
@@ -139,6 +141,57 @@ class FakeGitHub:
         self.repos[full_name] = record
         return record
 
+    # -- pull requests, against the real bare repository ---------------------
+
+    def sha(self, full_name: str, ref: str) -> str | None:
+        """What a branch of the bare repository points at, or None."""
+        done = subprocess.run(
+            ["git", "-C", str(self.bare(full_name)), "rev-parse", "--verify", ref],
+            capture_output=True, text=True,
+        )
+        return done.stdout.strip() or None
+
+    def open_pulls(self, full_name: str) -> list[dict[str, Any]]:
+        return [
+            pull
+            for pull in self.pulls
+            if pull["_repo"] == full_name and pull["state"] == "open"
+        ]
+
+    def merge(self, full_name: str, number: int) -> None:
+        """Merge a pull request, as a human would, by moving the base branch.
+
+        A fast-forward rather than a merge commit, which is what GitHub does for
+        a branch that is strictly ahead -- and it keeps the base's history a
+        superset of the branch's, which is the state the next push has to cope
+        with.
+        """
+        pull = next(p for p in self.pulls if p["_repo"] == full_name and p["number"] == number)
+        subprocess.run(
+            ["git", "-C", str(self.bare(full_name)), "update-ref",
+             f"refs/heads/{pull['base']['ref']}", f"refs/heads/{pull['head']['ref']}"],
+            check=True, capture_output=True,
+        )
+        pull["state"] = "closed"
+        pull["merged"] = True
+
+    def _create_pull(
+        self, full_name: str, head: str, base: str, title: str, body: str
+    ) -> dict[str, Any]:
+        number = len(self.pulls) + 1
+        pull = {
+            "_repo": full_name,
+            "number": number,
+            "state": "open",
+            "title": title,
+            "body": body,
+            "head": {"ref": head},
+            "base": {"ref": base},
+            "html_url": f"https://github.test/{full_name}/pull/{number}",
+        }
+        self.pulls.append(pull)
+        return pull
+
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         fake = self
 
@@ -150,13 +203,33 @@ class FakeGitHub:
                 length = int(self.headers.get("Content-Length") or 0)
                 return json.loads(self.rfile.read(length) or b"{}") if length else {}
 
-            def _reply(self, status: int, payload: dict[str, Any]) -> None:
+            def _reply(self, status: int, payload: Any) -> None:
                 raw = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def _pulls(self, full_name: str, payload: dict[str, Any]) -> None:
+                """Open a pull request, refusing an empty one as GitHub does."""
+                if fake.refuse_pulls:
+                    return self._reply(403, {"message": fake.refuse_pulls})
+                head, base = str(payload["head"]), str(payload["base"])
+                head_sha, base_sha = fake.sha(full_name, head), fake.sha(full_name, base)
+                if head_sha is None:
+                    return self._reply(422, {"message": f"Field:head Code:invalid ({head})"})
+                if head_sha == base_sha:
+                    return self._reply(
+                        422, {"message": f"No commits between {base} and {head}"}
+                    )
+                return self._reply(
+                    201,
+                    fake._create_pull(
+                        full_name, head, base,
+                        str(payload.get("title") or ""), str(payload.get("body") or ""),
+                    ),
+                )
 
             def _authorised(self) -> bool:
                 header = self.headers.get("Authorization", "")
@@ -171,6 +244,20 @@ class FakeGitHub:
                     return self._reply(401, {"message": "Bad credentials"})
                 if self.path.startswith("/orgs/") and self.path.count("/") == 2:
                     return self._reply(200, {"login": self.path.split("/")[2]})
+                route, _, query = self.path.partition("?")
+                if route.startswith("/repos/") and route.endswith("/pulls"):
+                    full_name = route.removeprefix("/repos/").removesuffix("/pulls")
+                    wanted = dict(
+                        pair.split("=", 1) for pair in query.split("&") if "=" in pair
+                    )
+                    head = wanted.get("head", "").split(":")[-1]
+                    found = [
+                        pull
+                        for pull in fake.open_pulls(full_name)
+                        if (not head or pull["head"]["ref"] == head)
+                        and pull["base"]["ref"] == wanted.get("base", pull["base"]["ref"])
+                    ]
+                    return self._reply(200, found)
                 if self.path.startswith("/repos/"):
                     full_name = self.path.removeprefix("/repos/")
                     record = fake.repos.get(full_name)
@@ -184,6 +271,8 @@ class FakeGitHub:
                 payload = self._body()
                 if not self._authorised():
                     return self._reply(401, {"message": "Bad credentials"})
+                if self.path.startswith("/repos/") and self.path.endswith("/pulls"):
+                    return self._pulls(self.path.removeprefix("/repos/").removesuffix("/pulls"), payload)
                 if fake.refuse_creation:
                     return self._reply(403, {"message": fake.refuse_creation})
                 org = self.path.split("/")[2]

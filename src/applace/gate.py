@@ -22,11 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import diagnostics, env, files, gitrepo, policy, shell
+from . import diagnostics, env, files, gitrepo, handover, policy, shell
 from .apps import INSTALL_TIMEOUT, require_app
 from .db import Connection, insert_gate, insert_snapshot, unpushed
 from .diagnostics import Diagnostic
 from .files import PathRefused
+from .handover import Handover, HumanEdits
 from .paths import ApplacePaths
 from .policy import PolicyError, Refusal
 from .shell import CommandNotFound
@@ -78,6 +79,8 @@ class GateReport:
     # Filled by the push that follows a green commit (D2). None when the app has
     # no repository, which is the normal state until someone connects an org.
     push: PushReport | None = None
+    # What a human has done to this repository that Applace did not do (M9).
+    human: Handover | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out = {
@@ -98,6 +101,8 @@ class GateReport:
             out["refused_deps"] = [refusal.as_dict() for refusal in self.refused]
         if self.push is not None:
             out["github"] = self.push.as_dict()
+        if self.human is not None and self.human.touched:
+            out["human"] = self.human.as_dict()
         return out
 
 
@@ -140,6 +145,20 @@ def write_files(
         _journal(conn, row, report, snapshot_id=None)
         return report
 
+    # Stage 0b (M9). A whole-file write over somebody's uncommitted edit is the
+    # one mistake this harness cannot undo: the previous content is not in git,
+    # not in a snapshot and not in the model's context. It is refused here,
+    # before anything is written, and the way out is a human's decision.
+    try:
+        handover.guard(conn, row, list(to_write))
+    except HumanEdits as exc:
+        report.stage = "handover"
+        report.errors = [Diagnostic(message=str(exc), file=exc.paths[0])]
+        report.dirty = gitrepo.is_dirty(root)
+        report.human = handover.survey(conn, row)
+        _journal(conn, row, report, snapshot_id=None)
+        return report
+
     before = files.read_dependencies(root, stack.manifest)
     try:
         applied = files.apply_writes(root, to_write, to_delete)
@@ -178,6 +197,12 @@ def write_files(
     report.dirty = gitrepo.is_dirty(root)
     _journal(conn, row, report, snapshot_id=snapshot_id)
     conn.commit()
+    # After the commit *and* after the journal. After the commit because a green
+    # gate stages the whole tree, so a human's edits that built are history now
+    # rather than something to warn about; after the journal because "is this
+    # tree dirty because of the agent or because of a person" is answered by the
+    # last gate, and the last gate is this one.
+    report.human = handover.survey(conn, row)
 
     # After the journal, deliberately: a push is a fact about GitHub, not about
     # the gate, and a network that is down must not turn a green write red (D2).

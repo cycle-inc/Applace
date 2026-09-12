@@ -518,3 +518,87 @@ def test_vercel_connect_then_status(home: Home, fake_vercel: object) -> None:
     status = runner.invoke(app, ["vercel", "status"])
     assert status.exit_code == 0
     assert "team t_1" in status.output
+
+
+# -- the handover: `applace open`, and reviewing what an agent wrote (M9) ----
+
+
+def test_open_falls_back_to_the_directory_when_an_app_has_nothing_else(
+    home: Home,
+) -> None:
+    paths, _ = home
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+
+    result = runner.invoke(app, ["open", "team-dashboard", "--print"])
+    assert result.exit_code == 0, result.output
+    assert "dir" in result.output
+    assert str(paths.app("team-dashboard")) in result.output
+
+
+def test_open_prefers_what_is_live_over_the_repository(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    paths, _ = home
+    _shippable(paths)
+    connected(paths, fake_github)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+    runner.invoke(app, ["deploy", "ship-it"])
+
+    result = runner.invoke(app, ["open", "ship-it", "--print"])
+    assert result.exit_code == 0, result.output
+    assert "live" in result.output and "http://127.0.0.1:52" in result.output
+
+    repo = runner.invoke(app, ["open", "ship-it", "--what", "repo", "--print"])
+    assert "https://github.test/acme/ship-it" in repo.output
+
+    runner.invoke(app, ["stop", "ship-it"])
+
+
+def test_open_says_what_an_app_has_when_it_does_not_have_what_was_asked_for(
+    home: Home,
+) -> None:
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    result = runner.invoke(app, ["open", "team-dashboard", "--what", "live", "--print"])
+    assert result.exit_code == 1
+    assert "has no live" in result.output
+    assert "dir" in result.output
+
+
+def test_connecting_with_review_says_what_will_happen_to_every_app(
+    paths: ApplacePaths, fake_github: FakeGitHub
+) -> None:
+    runner.invoke(app, ["init"])
+    result = runner.invoke(
+        app,
+        ["github", "connect", "--org", "acme", "--review", "pr",
+         "--api-base", fake_github.api_base],
+    )
+    assert result.exit_code == 0, result.output
+    assert "pull request" in result.output
+    assert github.load(paths) is not None and github.load(paths).reviewed  # type: ignore[union-attr]
+
+    status = runner.invoke(app, ["github", "status"])
+    assert "a pull request per app" in status.output
+
+
+def test_a_review_mode_that_does_not_exist_is_refused(paths: ApplacePaths) -> None:
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["github", "connect", "--org", "acme", "--review", "maybe"])
+    assert result.exit_code == 1
+    assert "--review must be one of" in result.output
+
+
+def test_push_prints_the_pull_request_it_opened(
+    home: Home, fake_github: FakeGitHub
+) -> None:
+    paths, _ = home
+    connected(paths, fake_github, review=github.REVIEW)
+    runner.invoke(app, ["new", "Team Dashboard", "--stack", "fake", "--no-install"])
+    root = paths.app("team-dashboard")
+    (root / "src" / "page.txt").write_text("a page\n", encoding="utf-8")
+    runner.invoke(app, ["check", "team-dashboard"])
+
+    result = runner.invoke(app, ["push", "team-dashboard"])
+    assert result.exit_code == 0, result.output
+    assert "applace/team-dashboard" in result.output
+    assert "/pull/1" in result.output
