@@ -22,7 +22,7 @@ refuses bad code and says why, and the model reads that answer.
 Run it against a harness that is already serving:
 
     applace serve --http 8848 &
-    uv run examples/chat/chat.py --model mistral-large-latest
+    uv run examples/chat/chat.py --provider mistral   # or openai, google, custom
 
 Then open http://127.0.0.1:8900. The key is read from the environment or from
 the `--env-file` file. A demo that talks to a paid model in a loop can spend
@@ -38,6 +38,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -59,7 +60,20 @@ PROVIDERS: dict[str, dict[str, str]] = {
     "openai": {
         "base": "https://api.openai.com/v1",
         "key": "OPENAI_API_KEY",
-        "model": "gpt-4.1-mini",
+        "model": "gpt-5.5",
+    },
+    # OpenAI's newest models take function tools on /responses and nowhere else.
+    "openai-responses": {
+        "base": "https://api.openai.com/v1",
+        "key": "OPENAI_API_KEY",
+        "model": "gpt-6-astra",
+        "api": "responses",
+    },
+    # Gemini answers the same shape as everyone else at this address.
+    "google": {
+        "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key": "GEMINI_API_KEY",
+        "model": "gemini-3.8-flash",
     },
     # A company's own gateway is the common case: it speaks the same shape.
     "custom": {"base": "", "key": "LLM_API_KEY", "model": ""},
@@ -73,11 +87,14 @@ PRICES: list[tuple[str, tuple[float, float]]] = [
     ("mistral-small", (0.1, 0.3)),
     ("gpt-4.1-mini", (0.4, 1.6)),
     ("gpt-4.1", (2.0, 8.0)),
+    ("gemini-3", (2.0, 12.0)),
 ]
 UNKNOWN_PRICE = (3.0, 15.0)
 
 ROUNDS = 12  # tool rounds per message; a build is a handful, a loop is endless
 TIMEOUT = 300
+EYES = 3  # screenshots kept in the conversation; the rest become this line
+OLD_PICTURE = "[capture plus ancienne, retirée: prends-en une nouvelle si besoin]"
 
 PREAMBLE = """\
 You are the assistant of a company's internal chat. People ask you for small
@@ -190,6 +207,38 @@ def text_of(result: Any) -> str:
     )
 
 
+def picture_of(result: Any) -> str | None:
+    """The screenshot in a tool result, as a data URL, or nothing.
+
+    `screenshot_app` answers with a report *and* a PNG, and neither API accepts a
+    picture inside a tool result -- so the image comes back in the next message
+    instead. Dropping it is the easy mistake and an expensive one: a build that
+    passes and a page that looks right are two different facts (D5), and a model
+    that only reads the report will tell you a chart is fine when its bars are
+    invisible.
+    """
+    for block in result.content:
+        data = getattr(block, "data", None)
+        if data and getattr(block, "mime_type", "").startswith("image/"):
+            return f"data:{block.mime_type};base64,{data}"
+    return None
+
+
+@dataclass
+class Reply:
+    """One answer from the model, whichever API said it.
+
+    The two shapes a tool-calling model speaks today are `/chat/completions`
+    (everyone) and OpenAI's `/responses` (its newest models take function tools
+    nowhere else). They disagree about every field name and agree about what
+    they mean, so the rest of this file only ever sees this.
+    """
+
+    text: str
+    calls: list[tuple[str, str, dict[str, Any]]]  # id, tool, arguments
+    usage: dict[str, Any] | None
+
+
 class Talk:
     """One conversation, and the app it is about."""
 
@@ -202,6 +251,7 @@ class Talk:
         model: str,
         key: str,
         budget: Budget,
+        api: str = "chat",
     ) -> None:
         self.session = session
         self.offered = offered
@@ -209,22 +259,150 @@ class Talk:
         self.model = model
         self.key = key
         self.budget = budget
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        self.api = api
+        self.system = system
+        self.said: list[dict[str, Any]] = (
+            [{"role": "system", "content": system}] if api == "chat" else []
+        )
         self.app: str | None = None
 
-    def ask(self) -> dict[str, Any]:
+    # -- the two shapes ----------------------------------------------------
+
+    def ask(self) -> Reply:
         """One call to the model. Blocking on purpose: it runs in a thread."""
-        body = json.dumps(
+        if self.api == "responses":
+            return self._responses()
+        return self._chat()
+
+    def _chat(self) -> Reply:
+        answered = self._post(
+            "/chat/completions",
             {
                 "model": self.model,
-                "messages": self.messages,
+                "messages": self.said,
                 "tools": self.offered,
                 "tool_choice": "auto",
-            }
-        ).encode()
+            },
+        )
+        message = answered["choices"][0]["message"]
+        self.said.append(message)
+        return Reply(
+            text=message.get("content") or "",
+            calls=[
+                (
+                    call["id"],
+                    call["function"]["name"],
+                    json.loads(call["function"]["arguments"] or "{}"),
+                )
+                for call in (message.get("tool_calls") or [])
+            ],
+            usage=answered.get("usage"),
+        )
+
+    def _responses(self) -> Reply:
+        answered = self._post(
+            "/responses",
+            {
+                "model": self.model,
+                "instructions": self.system,
+                "input": self.said,
+                "tools": [
+                    {"type": "function", **tool["function"]} for tool in self.offered
+                ],
+                "store": False,
+            },
+        )
+        # Everything it produced goes back in next time, reasoning included:
+        # with `store: false` the model has no other memory of its own thinking.
+        self.said.extend(answered["output"])
+        text = "\n".join(
+            part.get("text", "")
+            for item in answered["output"]
+            if item.get("type") == "message"
+            for part in item.get("content", [])
+        )
+        usage = answered.get("usage") or {}
+        return Reply(
+            text=text.strip(),
+            calls=[
+                (item["call_id"], item["name"], json.loads(item["arguments"] or "{}"))
+                for item in answered["output"]
+                if item.get("type") == "function_call"
+            ],
+            usage={
+                "prompt_tokens": usage.get("input_tokens"),
+                "completion_tokens": usage.get("output_tokens"),
+            },
+        )
+
+    def result(self, call_id: str, payload: str) -> None:
+        """Hand a tool's answer back, in the shape this API expects."""
+        if self.api == "responses":
+            self.said.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": payload,
+                }
+            )
+        else:
+            self.said.append(
+                {"role": "tool", "tool_call_id": call_id, "content": payload}
+            )
+
+    def forget_pictures(self) -> None:
+        """Keep the last few captures and replace the older ones with a line.
+
+        Every provider caps the images in one request -- Mistral refuses the
+        ninth -- and a capture from six edits ago is not what the page looks
+        like now, so an agent that keeps them all pays to be confused.
+        """
+        kept = 0
+        for message in reversed(self.said):
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            parts: list[Any] = content
+            if not any(
+                isinstance(part, dict) and part.get("type") in ("image_url", "input_image")
+                for part in parts
+            ):
+                continue
+            kept += 1
+            if kept < EYES:
+                continue
+            kind = "input_text" if self.api == "responses" else "text"
+            message["content"] = [{"type": kind, "text": OLD_PICTURE}]
+
+    def see(self, picture: str) -> None:
+        """Show the model the page it just looked at."""
+        self.forget_pictures()
+        said = "Voici la capture que tu viens de prendre. Regarde-la."
+        if self.api == "responses":
+            self.said.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": said},
+                        {"type": "input_image", "image_url": picture},
+                    ],
+                }
+            )
+        else:
+            self.said.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": said},
+                        {"type": "image_url", "image_url": {"url": picture}},
+                    ],
+                }
+            )
+
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
-            f"{self.base}/chat/completions",
-            data=body,
+            f"{self.base}{path}",
+            data=json.dumps(body).encode(),
             headers={
                 "Authorization": f"Bearer {self.key}",
                 "Content-Type": "application/json",
@@ -252,7 +430,7 @@ def slug_of(payload: str) -> str | None:
 
 async def answer(talk: Talk, said: str) -> AsyncIterator[str]:
     """A turn: the model talks, calls tools, and the chat narrates both."""
-    talk.messages.append({"role": "user", "content": said})
+    talk.said.append({"role": "user", "content": said})
     for _ in range(ROUNDS):
         if talk.budget.over:
             yield frame("error", {"text": "This demo has spent its budget."})
@@ -262,18 +440,13 @@ async def answer(talk: Talk, said: str) -> AsyncIterator[str]:
         except (RuntimeError, OSError) as error:  # the model is somebody else's service
             yield frame("error", {"text": f"The model did not answer: {error}"})
             return
-        talk.budget.add(reply.get("usage"))
-        message = reply["choices"][0]["message"]
-        talk.messages.append(message)
-        if message.get("content"):
-            yield frame("say", {"text": message["content"]})
-        calls = message.get("tool_calls") or []
-        if not calls:
+        talk.budget.add(reply.usage)
+        if reply.text:
+            yield frame("say", {"text": reply.text})
+        if not reply.calls:
             yield frame("done", {"spent": round(talk.budget.spent, 4)})
             return
-        for call in calls:
-            name = call["function"]["name"]
-            args = json.loads(call["function"]["arguments"] or "{}")
+        for call_id, name, args in reply.calls:
             verb = VERBS.get(name)
             yield frame("doing", {"text": verb(args) if verb else name})
             result = await talk.session.call_tool(name, args)
@@ -282,9 +455,10 @@ async def answer(talk: Talk, said: str) -> AsyncIterator[str]:
             if slug and slug != talk.app:
                 talk.app = slug
                 yield frame("app", {"app": slug})
-            talk.messages.append(
-                {"role": "tool", "tool_call_id": call["id"], "content": payload}
-            )
+            talk.result(call_id, payload)
+            picture = picture_of(result)
+            if picture is not None:
+                talk.see(picture)
     # Not an error the model can see: the cap exists precisely for the case
     # where it would keep going, so the turn ends and the person decides.
     yield frame("error", {"text": f"I stopped after {ROUNDS} steps. Ask me to go on."})
@@ -383,7 +557,14 @@ def parse() -> argparse.Namespace:
     parser.add_argument("--provider", default="mistral", choices=sorted(PROVIDERS))
     parser.add_argument("--model", default=None)
     parser.add_argument("--base", default=None, help="OpenAI-compatible base URL.")
+    parser.add_argument(
+        "--api", default=None, choices=["chat", "responses"],
+        help="Which OpenAI shape to speak. Defaults to the provider's.",
+    )
     parser.add_argument("--key-name", default=None, help="Environment variable to read.")
+    parser.add_argument(
+        "--rounds", type=int, default=ROUNDS, help="Tool rounds per message."
+    )
     parser.add_argument("--env-file", type=Path, default=Path.home() / ".env")
     parser.add_argument("--budget", type=float, default=2.0, help="Dollars, whole run.")
     parser.add_argument("--port", type=int, default=8900)
@@ -391,10 +572,13 @@ def parse() -> argparse.Namespace:
 
 
 def main() -> int:
+    global ROUNDS
     args = parse()
+    ROUNDS = args.rounds
     provider = PROVIDERS[args.provider]
     base = (args.base or provider["base"]).rstrip("/")
     model = args.model or provider["model"]
+    api = args.api or provider.get("api", "chat")
     if not base or not model:
         raise SystemExit("A custom provider needs --base and --model.")
     key = read_key(args.key_name or provider["key"], args.env_file)
@@ -415,7 +599,9 @@ def main() -> int:
                     model,
                     key,
                     Budget(args.budget, model),
+                    api,
                 )
+                print(f"Model  {model} ({api})")
                 print(f"Chat   http://127.0.0.1:{args.port}")
                 print(f"Panel  {applace}/panel")
                 yield

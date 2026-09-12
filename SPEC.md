@@ -478,6 +478,25 @@ card beside it went from `new` to green to "Green, and what is live is this
 commit" with the screenshot, the preview and the deployment all in `urls`. The
 model was never told anything about Applace that `get_skill` did not tell it.
 
+*Three vendors:* the same chatbot, the same harness, one app each, built and then
+updated by a second request — Mistral (`mistral-medium-2604`, an incident
+dashboard with filters, a chart, a detail pane and a CSV export, ~$0.15), OpenAI
+(`gpt-6-astra` over `/responses`, an onboarding checklist, ~$0.95) and Google
+(`gemini-3.8-flash`, an internal API catalogue, a few dollars against a guessed
+price table). All three chose a stack, created the repository, passed the gate,
+looked at the page and deployed locally with nothing said to them that
+`get_skill` did not say. Two findings came out of it and are fixed in the
+example: OpenAI's newest models accept function tools on `/responses` only, and
+the *eyes have to reach the model* — `screenshot_app` returns a report and a PNG,
+and the first version of the chat joined the text blocks and dropped the image.
+Mistral's chart rendered as invisible bars and the model declared it fine,
+because it had read a console log, not looked at a page. With the picture put
+into the next message it opened with "aucune barre n'apparaît", found the CSS,
+and fixed it. It then spent six more rounds fixing what it had already repaired,
+announcing failure each time, until the provider refused a ninth image — so the
+last capture is also kept deliberately short (`EYES`), and the round cap, not the
+model's judgement, is what ends a visual loop.
+
 What M10 learned. **A chat window is a different reader, not a smaller one.**
 `get_app` is exhaustive because an agent is about to write code; a card is one
 state, one sentence and the links, because it is about to be rendered next to a

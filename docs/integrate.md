@@ -84,7 +84,7 @@ async with streamable_http_client("http://127.0.0.1:8848/mcp") as (read, write, 
         system = text_of(await applace.call_tool("get_skill", {}))
 ```
 
-Two rules, and they are the difference between a demo and something that works
+Three rules, and they are the difference between a demo and something that works
 on the twentieth request:
 
 - **Pass the tool schemas through unedited.** What an agent may do is the
@@ -94,6 +94,20 @@ on the twentieth request:
   of this machine: which stacks exist, whether apps are pushed to GitHub,
   whether production deploys need a human, where it can deploy. Hard-coding any
   of that into a prompt means maintaining it twice.
+- **Put the screenshot back into the conversation as an image.**
+  `screenshot_app` answers with a report *and* a PNG, and no API accepts an
+  image inside a tool result — so pull the image block out and send it in the
+  next user message. A loop that joins the text and drops the picture has given
+  the model the console log, not eyes: it will report a chart as fine while its
+  bars are invisible. Keep the last two or three; providers cap how many images
+  one request may carry, and an old capture is not what the page looks like now.
+
+Two wire shapes, if you are choosing models: everyone speaks
+`/chat/completions`, Gemini included (base
+`https://generativelanguage.googleapis.com/v1beta/openai`), but OpenAI's newest
+models take function tools on `/responses` **only** — `input`,
+`function_call_output`, `input_image`. `examples/chat/chat.py` implements both
+behind one class, in about thirty lines of difference.
 
 Then run the ordinary loop: model → tool calls → results → model. There is
 nothing Applace-specific in it. The gate is what makes that loop safe — a write
@@ -187,6 +201,10 @@ screen and none of which are readable there.
 - **Loops cost money.** A model with a build tool will retry. Cap the tool
   rounds per message and stop the turn when a dollar budget is reached; the
   example does both in twenty lines, and prints what it spent.
+- **"I fixed it" is not evidence.** Even with the screenshot in context, a model
+  will announce a visual fix it has not made, and will also keep "fixing" a
+  chart it repaired three edits ago. The round cap is what ends that; the
+  screenshot on the card is what lets a person settle it in a second.
 - **The panel is read-only, not private.** It inherits the trust of the machine
   it runs on: anyone who can reach the port can see the cards and the previews.
   Keep it on loopback, or behind the authentication your chat already has. Who
