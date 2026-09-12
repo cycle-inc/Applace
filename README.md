@@ -25,7 +25,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M11 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M12 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -38,8 +38,11 @@ from git, pinned to a commit, with the drift reported rather than applied), the
 handover (a pull request a person merges, a refusal to write over what they
 are editing, and `applace open`), the chat window (a read-only panel on the
 same port, a live card per app, and the one script tag a company's own chatbot
-embeds), and the package (`from applace import Applace`, the same behaviours as
-a Python class, with the MCP server rewritten as a skin over it).
+embeds), the package (`from applace import Applace`, the same behaviours as
+a Python class, with the MCP server rewritten as a skin over it), and the
+machine (one home per person under a root, ports nobody can collide on, quotas
+that refuse instead of queueing, and a collection that stops processes without
+deleting anybody's code).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -305,6 +308,55 @@ The class also has what an agent must never have (D19): `set_env` with a
 `remove`, and the panel's `card`/`cards` without the HTTP. None of those is a
 tool, and none ever will be — a secret value and a connection are the
 deployment's to decide, not the model's.
+
+### For more than one person
+
+A backend serving a company serves thousands of people. Each of them gets a
+whole Applace home under one root (D20) — their own database, their own
+repositories, their own secrets at `0700` — and the root arbitrates what there
+is only one of: this machine's ports and this machine's disk (D21).
+
+```python
+from applace import Machine
+
+machine = Machine("/srv/applace")
+
+def handle(request):                       # in your own web handler
+    ap = machine.user(request.user.id)     # made on first use, cheap after
+    return ap.create(request.json["name"])
+```
+
+Applace authenticates nobody: you say who the user is, having already asked. The
+id is opaque — an email, a UUID, a display name in any script — and it is never
+parsed as a path.
+
+Limits are per home and refuse rather than queue (D22), which is also where the
+cap that stops a model looping at your expense belongs:
+
+```yaml
+# /srv/applace/machine.yaml -- absent means the defaults, which are generous
+limits:
+  apps: 20
+  previews: 2
+  disk_mb: 4000
+  writes_per_hour: 240
+  deploys_per_hour: 30
+  shots_per_hour: 300
+```
+
+A refusal is an ordinary answer — `{"ok": false, "code": "quota", …}` or
+`{"ok": false, "code": "rate-limit", "retry_after": 812, …}` — so a chat window
+can say "not right now, and here is why" instead of hanging.
+
+Whoever is on call gets the same view from the terminal, and a `gc` that is safe
+on a cron: it stops idle dev servers, frees their ports and removes scratch
+checkouts, and never deletes an app, a repository, a secret or a home (D23).
+
+```bash
+uv run applace machine users --root /srv/applace
+uv run applace machine ports --root /srv/applace
+uv run applace machine gc    --root /srv/applace --preview-hours 2
+```
 
 ### Inside your own chatbot
 

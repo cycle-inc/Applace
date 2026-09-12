@@ -151,6 +151,65 @@ for a secret your backend already holds, `ap.connect_github(org)`,
 Those are the deployment's decisions, and no model should be able to make
 them.
 
+**And when it is not one person.** A chatbot inside a company has thousands of
+users, and they cannot share a home: one person's `team-dashboard` is not
+another's. A root gives each of them a whole Applace (D20), and arbitrates the
+two things there is only one of — this machine's ports and this machine's disk
+(D21):
+
+```python
+from applace import Machine
+
+machine = Machine("/srv/applace")               # once, at startup
+
+def handle(request):                            # per request
+    ap = machine.user(request.user.id)          # their home, made on first use
+    return ap.write(request.json["app"], request.json["files"])
+```
+
+Applace authenticates nobody. You have already asked who this is; the id you
+pass is opaque — an email, a UUID, a display name in any script — and it becomes
+a directory name, never a path. Everything above still applies: `ap` is the same
+class, with the same methods and the same answers.
+
+What the root adds is refusal. Limits live in `/srv/applace/machine.yaml` (or in
+`Machine(root, limits=Limits(...))`) and come back as ordinary answers rather
+than exceptions or queues (D22):
+
+```yaml
+limits:
+  apps: 20            # per home
+  previews: 2
+  disk_mb: 4000
+  writes_per_hour: 240
+  deploys_per_hour: 30
+  shots_per_hour: 300
+```
+
+```python
+{"ok": False, "code": "quota", "error": "...", "limit": 20, "used": 20, "hint": "..."}
+{"ok": False, "code": "rate-limit", "error": "...", "retry_after": 812, "window": "hour"}
+```
+
+Branch on `code`, show `error`, and let `retry_after` write the sentence about
+when to come back. This is also the honest place for the cap that stops a model
+looping at your expense: your own round limit protects one conversation, the
+machine's rate limit protects the machine.
+
+Two operational things you will want on day one. The panel routes
+(`/panel/...`) serve *one* home, so behind a root you render cards yourself —
+`ap.card(slug)` is the same payload, and your own authentication decides who
+sees it. And collection is a cron job, not a background thread:
+
+```bash
+applace machine users --root /srv/applace     # who is here, and what they use
+applace machine ports --root /srv/applace     # who holds which port
+applace machine gc    --root /srv/applace     # stop idle previews, free ports
+```
+
+`gc` never deletes an app, a repository, a secret or a home (D23). A person who
+comes back to a stopped preview is one click from where they were.
+
 ## 3. Show the app
 
 The person who asked is not going to read a tool result. Put the app in the
@@ -237,7 +296,9 @@ screen and none of which are readable there.
 
 - **Loops cost money.** A model with a build tool will retry. Cap the tool
   rounds per message and stop the turn when a dollar budget is reached; the
-  example does both in twenty lines, and prints what it spent.
+  example does both in twenty lines, and prints what it spent. Behind a root,
+  set `writes_per_hour` and `shots_per_hour` too: your cap protects one
+  conversation, the machine's protects the machine from every conversation.
 - **"I fixed it" is not evidence.** Even with the screenshot in context, a model
   will announce a visual fix it has not made, and will also keep "fixing" a
   chart it repaired three edits ago. The round cap is what ends that; the
@@ -254,8 +315,14 @@ screen and none of which are readable there.
 - **Let the humans merge.** With `--review pr`, everything an agent writes lands
   on a branch with one open pull request, and the card carries its URL. Nothing
   reaches `main` because a conversation went well.
-- **One harness, one machine.** Applace is local-first; a shared instance for a
-  whole company is not what this is yet. Per-team laptops or per-team boxes.
+- **One home per person, and you say who they are.** A shared box uses
+  `Machine(root)` so nobody builds in anybody else's home — but Applace
+  authenticates nobody and checks nothing about the id you pass it. If your
+  handler gets that wrong, two people share a home, and no quota or gate below
+  will notice.
+- **Put the collector on a cron.** Dev servers left running hold ports and
+  memory until somebody stops them. `applace machine gc --root …` every hour
+  stops the idle ones and frees what they held, and deletes nothing else.
 
 ## 6. Run the example
 

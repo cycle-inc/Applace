@@ -143,15 +143,18 @@ def canonical_json(value: Any) -> str:
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open the database, creating and migrating the schema if needed."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # A dev-server supervisor and an MCP tool answering a question are two
     # connections to one file, and under the default rollback journal the reader
     # blocks the writer. WAL lets them get on with it; `busy_timeout` says to
-    # wait for the write lock rather than raise "database is locked".
+    # wait for the write lock rather than raise "database is locked" -- and it
+    # is set before the switch to WAL, which is itself a write that needs an
+    # exclusive lock and will fail outright if this connection was never told
+    # to wait for one.
+    conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.execute(

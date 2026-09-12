@@ -58,7 +58,7 @@ Three things, and they are the whole product:
 | **D8** | **Secrets never enter the model's context.** The agent declares and reads *names* of environment variables; values are supplied by a human through the CLI, stored outside the repository, injected into the dev server and synchronised to the deploy target. No tool ever returns a value, and `.env` is in the app's `.gitignore` from the first commit. |
 | **D9** | **Dependencies are policy.** Every dependency an agent adds is reported by the gate as `new_deps` and checked against `policy.yaml` (allowlist, denylist, permitted registry). The default policy allows anything from the public registry and reports it; a company tightens it. |
 | **D10** | **Stack: Python ≥ 3.11**, official `mcp` SDK, `pydantic` v2, `typer`, stdlib `sqlite3` and `subprocess`, `uv` for packaging. No agent framework, no ORM, no Node in the harness itself — Applace *drives* Node, it is not written in it, so `uvx applace` is the only install step. |
-| **D11** | **Local-first, single-user.** No accounts, no multi-tenancy, no hosted control plane. The unit of trust is the machine, exactly as in Runlace. |
+| **D11** | **Local-first, single-user.** No accounts, no multi-tenancy, no hosted control plane. The unit of trust is the machine, exactly as in Runlace. Extended, not repealed, by D20: a machine can hold many homes, and each one is still a whole single-user Applace. |
 | **D12** | **Vercel deploys through GitHub, not through an upload.** The Vercel project is linked to the app's repository: a branch gives a preview URL, `main` gives production. `deploy_app` establishes the link, triggers the build and waits for its outcome; it never bypasses the repository. A direct-upload fallback exists only for apps with no GitHub connection. |
 | **D13** | **The remote wins.** If the GitHub repository has moved ahead of the local tree — a human pushed, another machine pushed — the snapshot is refused and the divergence is reported. Applace never force-pushes and never rewrites history. |
 | **D14** | **v1 apps are front ends.** A generated app is a browser application that talks to APIs that already exist; the stack supplies the client and the base URL. No database, no server runtime, no BaaS. A full-stack stack is a v2 question and is not to be anticipated in v1 code. |
@@ -67,6 +67,10 @@ Three things, and they are the whole product:
 | **D17** | **The package is the fourth door.** Applace ships three ways in: a CLI for a human at a terminal, an MCP server for an agent, a `SKILL.md` for the model that reads it. The developer putting Applace under their company's chatbot has none of the three — they have a Python process. `from applace import Applace` is the same store, the same gate and the same journal, called directly, and the MCP server becomes one caller of it rather than the only door. Every method returns a plain dict with `ok`, `code`, `error` and `hint`, and none raises because a build went red: that is the convention everywhere else and it is right here too, whether the reader is a model or a web handler. |
 | **D18** | **Every method is synchronous.** Applace's slow calls are subprocesses — npm, tsc, vite, a browser — not sockets. A coroutine whose body is `asyncio.to_thread` claims a concurrency it does not have and colours every caller for nothing; the MCP SDK already runs sync tools on a worker thread, which is why `create_app` and `write_files` are declared sync there. An async backend writes `await asyncio.to_thread(ap.write, ...)` — one line, at the only place that knows its own event loop. |
 | **D19** | **The developer's half of the API is not a tool, and never becomes one.** Two things exist only because a person is answerable for them: supplying the **value** of a secret (D8), and connecting this machine to a GitHub organisation, a Vercel account or a company stack (D2b, D6, D7). They are methods on the class and they are not MCP tools — the same principle as Runlace's `approve`: an agent that could do them would be authorising itself. And no method returns a value; `env()` lists names and whether each one has been supplied. |
+| **D20** | **A tenant is a home, not a column.** A chatbot serving a company serves thousands of people, and the way to keep their work apart is one Applace home per person under a root — not a `user_id` on every table. Isolation is then the filesystem's and the operating system's job rather than a `WHERE` clause everyone has to remember: a leak needs a bug in Applace *and* in POSIX. Each home is a complete single-user Applace (D11) with its own database, its own git repositories and its own `env/` at `0700`; a machine with one home is the degenerate case, and the code path is the same one. Applace does not authenticate anybody: the caller says who the user is, and is answerable for having asked. |
+| **D21** | **What is shared is exactly what cannot be copied.** Two homes can have their own of everything except the things there is only one of: the machine's ports and the machine's disk. So a root holds one ledger — who holds which port, and what each home has spent — and every claim on a port goes through it in a single transaction before anything binds. Probing a port and then binding it is a race that shows up as a dev server that died for no reason; the ledger is what makes "no other app, in no other home" true. |
+| **D22** | **A limit is an answer, not a queue and not a crash.** Quotas (apps, previews, disk) and rates (writes, deploys, screenshots per window) come back the way every other refusal does — `ok: false`, a `code` of `quota` or `rate-limit`, a sentence a UI can show, and what it would take to proceed. Nothing blocks waiting for a slot: a chatbot's user asked a question, and "not right now, here is why" is a better answer than a request that hangs. The cap belongs here rather than in each integrator's loop, because the machine is what actually runs out. |
+| **D23** | **Nobody's code is garbage.** Collection stops processes, releases ports and deletes scratch — a dev server nobody has looked at for hours, a claim whose process is gone, a checkout a deploy left behind. It never deletes an app, a repository, a secret or a home. A person who comes back to an idle preview finds it stopped, which is a URL away from where they were; a person who comes back to a deleted repository has lost work, and no quota is worth that. |
 
 ## Directory layout (user machine)
 
@@ -80,6 +84,16 @@ Three things, and they are the whole product:
   env/<slug>.env           # secret values, outside the repository (D8)
   logs/<slug>/             # dev server and build logs
   shots/<slug>.png         # the last screenshot, for the chat window (D16)
+```
+
+And on a machine serving many people (D20), the same directory is one per
+person, under a root that holds the only two things they share:
+
+```
+/srv/applace/
+  machine.db               # SQLite: the port ledger and what each home spent
+  machine.yaml             # quotas and rates (optional; defaults are generous)
+  users/<id>/              # a whole Applace home, exactly as above
 ```
 
 ## The stack contract
@@ -570,3 +584,75 @@ first `card()` came back without the `ok` the panel's HTTP route adds, so the
 same card had two shapes depending on the door — a difference nobody would have
 noticed until a caller switched doors. The class carries it now, and the
 acceptance compares the two byte for byte.
+
+**M12 — Many people, one machine.** *Shipped.* D11 said single-user and M10
+deferred identity to "the next milestone". This is it, and the answer is not a
+`user_id` column: a root holds one whole Applace home per person (D20), and what
+the homes share is only what there is one of — this machine's ports and this
+machine's disk (D21).
+
+    from applace import Machine
+
+    ap = Machine("/srv/applace").user(request.user.id)
+    ap.create("Team Dashboard")
+
+Four deliverables:
+
+1. **The root.** `Machine(root)` hands back a `Applace` per user id, made on
+   first use, at `root/users/<name>-<digest>/`. The id is whatever the caller's
+   own system calls a person and is never parsed: `../../etc` is a directory
+   name, not a path, and two ids that flatten to the same readable name still
+   get two homes because the digest is of the id.
+2. **The ledger.** `root/machine.db`: who holds which port, and what each home
+   has spent. A preview or a local deployment claims its port inside one
+   `BEGIN IMMEDIATE` transaction, probe included, and says which pid took it.
+   Nothing ever releases a port: a claim whose process is gone is reaped, which
+   is the same lesson M3 learned about previews applied to the machine.
+3. **The limits.** `Limits` and an optional `root/machine.yaml`: apps, previews
+   and disk per home, and writes, deploys and screenshots per hour. They are
+   checked in the class every other door goes through, so a quota refuses
+   *before* `npm install` rather than after it, and a refusal is an answer with
+   a `code` (D22) — which is also where the anti-loop cap now lives, instead of
+   in each integrator's chat loop.
+4. **The collection.** `Machine.gc()` and `applace machine gc --root`, safe on a
+   cron: stop previews nobody has watched for hours, reap dead claims, remove
+   scratch checkouts, forget stale spend. It deletes no app, no repository, no
+   secret and no home (D23). `applace machine users|ports` is the same view for
+   whoever is on call.
+
+Out of scope, and named so it is not smuggled in: authentication. Applace does
+not know who anybody is. The backend that calls `Machine.user(id)` has already
+answered that question and is answerable for the answer.
+
+*Acceptance:* `scripts/m12_acceptance.sh` — three people under one root create
+the same app at the same instant with the real stack, each in their own home;
+one of them sets a secret and it exists in no file of anybody else's; their
+three dev servers run at once, answer, and hold three different ports in the
+ledger; a quota refuses a fourth app with `code: "quota"` and installs nothing;
+a rate limit refuses a second write with a `retry_after` a UI can show; a broken
+`machine.yaml` is an error rather than a quieter limit; and a collection stops
+all three previews and frees all three ports while every repository, every app
+and every secret is still exactly where it was.
+
+What M12 learned. **Opening the database is a write.** Three people arriving in
+the same instant deadlocked the acceptance run, and the cause was one line's
+order: `PRAGMA journal_mode = WAL` takes an exclusive lock, and a connection
+that has not yet been told `busy_timeout` raises `database is locked` instead of
+waiting for it. The pragma is set before the switch now — in the ledger and in
+the per-home database, which had carried the same ordering since M1 and never
+fired, because one caller never races itself. **Nothing releases a port.** A
+`release()` beside `stop_preview` would have been dead code the day a process
+was killed from outside, so a claim is a lease whose truth is the process, and
+the only lifecycle is reaping — M3's lesson about previews, applied to the
+machine. Which drags M3's other lesson along with it: **`os.kill(pid, 0)` says a
+zombie is alive**, so a stopped preview kept holding its port until `alive()`
+asked `ps` the same way the supervisor does. **The readable part of a home's
+name is a courtesy; the digest is the identity.** `alice@example.com` and
+`alice-example-com` flatten to the same directory name, and two people sharing
+one home is the one failure this milestone cannot have. **A limit is counted at
+the moment of asking**, from the apps table and the ledger rather than from a
+balance somebody maintains: a balance is a second account of the same facts, and
+the one that can be wrong. And **the collector cannot assume a database**: a
+home registered by a person who never created anything still accumulates
+scratch, and the first `gc` skipped those homes entirely because it looked for
+`applace.db` before looking for work to do.

@@ -16,6 +16,11 @@ from pathlib import Path
 class ApplacePaths:
     home: Path
 
+    # The machine's shared ledger, when this home is one of many under a root
+    # (D20, D21). None on an ordinary single-user machine: there is nothing to
+    # arbitrate with, and every code path that reads it says so.
+    ledger: Path | None = None
+
     @property
     def db(self) -> Path:
         return self.home / "applace.db"

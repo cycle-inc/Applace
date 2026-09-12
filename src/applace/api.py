@@ -39,7 +39,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterator, ParamSpec
 
-from . import apps, deploy, env, gate, github, panel, policy, skill
+from . import apps, deploy, env, gate, github, machine, panel, policy, skill
 from . import stackstore, sync, vercel
 from .apps import AppError, AppExists
 from .db import Connection, connect
@@ -50,6 +50,7 @@ from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable
 from .github import DEFAULT_HOST, DEFAULT_VISIBILITY, DIRECT, REVIEWS, VISIBILITIES
 from .github import GitHubError, GitHubLink
 from .gitrepo import GitError
+from .machine import Limits
 from .naming import InvalidName
 from .paths import ApplacePaths
 from .paths import paths as default_paths
@@ -119,11 +120,23 @@ class Applace:
 
         ap = Applace()                      # ~/.applace, or $APPLACE_HOME
         ap = Applace("/srv/applace")        # somewhere else
+
+    `limits` is what one home may have and may do (D22). It is None here and on
+    every single-user machine -- nothing is counted and nothing is refused --
+    and it is set for you by :class:`applace.machine.Machine`, which is how a
+    backend serving many people gets quotas without each caller remembering to
+    ask for them.
     """
 
-    def __init__(self, home: ApplacePaths | Path | str | None = None) -> None:
+    def __init__(
+        self,
+        home: ApplacePaths | Path | str | None = None,
+        *,
+        limits: Limits | None = None,
+    ) -> None:
         self.paths = _resolve(home)
         self.paths.create()
+        self.limits = limits
 
     # -- what an agent does -------------------------------------------------
 
@@ -157,7 +170,13 @@ class Applace:
 
         Minutes, not seconds -- it installs dependencies. When it returns, the
         app already builds and `app` is the slug every other method takes.
+
+        Under a root this is where a quota bites, before the install rather
+        than after it (D22): `code` is then `quota`.
         """
+        refused = self._over_quota("apps") or self._over_quota("disk_mb")
+        if refused is not None:
+            return refused
         with self._session() as conn:
             report = apps.create_app(
                 self.paths, conn, name=name, stack_name=stack, description=description
@@ -205,6 +224,10 @@ class Applace:
         tool's diagnostics with file, line and column. Call it with no `files`
         to re-check an app that is dirty.
         """
+        refused = self._over_rate("write")
+        if refused is not None:
+            return refused
+        self._charge("write")
         with self._session() as conn:
             report = gate.write_files(
                 self.paths,
@@ -236,7 +259,15 @@ class Applace:
 
     @answered
     def preview(self, app: str) -> dict[str, Any]:
-        """Run the app's dev server and get a URL. Idempotent."""
+        """Run the app's dev server and get a URL. Idempotent.
+
+        A home may only have so many running at once (D22); asking again for
+        one that is already up costs nothing and is never refused.
+        """
+        if not self._previewing(app):
+            refused = self._over_quota("previews")
+            if refused is not None:
+                return refused
         with self._session() as conn:
             return {"ok": True, **apps.start_preview(self.paths, conn, app).as_dict()}
 
@@ -264,6 +295,10 @@ class Applace:
 
         Starts the preview if it is not running, and leaves it running.
         """
+        refused = self._over_rate("shot")
+        if refused is not None:
+            return refused
+        self._charge("shot")
         with self._session() as conn:
             shot, started = apps.screenshot(
                 self.paths,
@@ -298,6 +333,10 @@ class Applace:
         that forbids production refuses it outright. What goes live is a commit,
         never the working tree.
         """
+        refused = self._over_rate("deploy")
+        if refused is not None:
+            return refused
+        self._charge("deploy")
         with self._session() as conn:
             report = apps.deploy_app(
                 self.paths,
@@ -557,6 +596,82 @@ class Applace:
         with self._session() as conn:
             path = apps.remove_app(self.paths, conn, app, delete_files=delete_files)
         return {"ok": True, "app": app, "path": str(path), "deleted": delete_files}
+
+    # -- limits (D22) -------------------------------------------------------
+
+    def _over_quota(self, what: str) -> dict[str, Any] | None:
+        """Is this home already at its limit for `what`? None means go ahead.
+
+        Counted at the moment of asking rather than tracked as a balance: the
+        truth about how many apps a person has is the apps table, and a balance
+        would be one more thing that can be wrong.
+        """
+        if self.limits is None:
+            return None
+        limit = getattr(self.limits, what)
+        if limit is None:
+            return None
+        used = self._used(what)
+        if used < limit:
+            return None
+        return {
+            "ok": False,
+            "code": "quota",
+            "error": f"this home is at its limit of {limit} "
+            f"{'MB of disk' if what == 'disk_mb' else what}.",
+            "limit": limit,
+            "used": used,
+            "hint": {
+                "apps": "Remove an app you are done with.",
+                "previews": "Stop a preview before starting another.",
+                "disk_mb": "Remove an app you are done with, with its files.",
+            }[what],
+        }
+
+    def _previewing(self, app: str) -> bool:
+        """Is this app already the one holding one of the home's preview slots?"""
+        with self._session() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM previews JOIN apps ON apps.id = previews.app_id "
+                "WHERE apps.slug = ?",
+                (app,),
+            ).fetchone()
+        return row is not None
+
+    def _used(self, what: str) -> int:
+        if what == "disk_mb":
+            return machine.disk_mb(self.paths.home)
+        table = "apps" if what == "apps" else "previews"
+        with self._session() as conn:
+            return int(
+                conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            )
+
+    def _over_rate(self, act: str) -> dict[str, Any] | None:
+        """Has this home done too many of those this hour? None means go ahead."""
+        if self.limits is None or self.paths.ledger is None:
+            return None
+        limit = self.limits.rate_for(act)
+        if limit is None:
+            return None
+        used = machine.spent(self.paths, act)
+        if used < limit:
+            return None
+        return {
+            "ok": False,
+            "code": "rate-limit",
+            "error": f"this home has done {used} {act}s in the last hour, "
+            f"which is its limit.",
+            "limit": limit,
+            "used": used,
+            "window": "hour",
+            "retry_after": machine.frees_in(self.paths, act),
+            "hint": "Wait, or ask whoever runs this machine for more.",
+        }
+
+    def _charge(self, act: str) -> None:
+        if self.limits is not None:
+            machine.spend(self.paths, act)
 
     # ----------------------------------------------------------------------
 

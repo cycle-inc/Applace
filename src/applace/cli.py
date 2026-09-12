@@ -51,6 +51,7 @@ from .github import api as github_api
 from .github import load as github_load
 from .github import token as github_token
 from .init_cmd import InitReport, run_init
+from .machine import Machine, MachineError
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
@@ -1249,6 +1250,115 @@ def serve(
         typer.echo(f"MCP    http://{host}:{http}/mcp")
         typer.echo(f"Panel  http://{host}:{http}/panel")
     serve_server(paths, port=http, host=host)
+
+
+machine_app = typer.Typer(
+    add_completion=False,
+    help="A root holding one home per person, for a backend serving many (D20).",
+    no_args_is_help=True,
+)
+app.add_typer(machine_app, name="machine")
+
+ROOT_OPTION = typer.Option(
+    "--root",
+    envvar="APPLACE_ROOT",
+    help="The directory holding every user's home. Defaults to $APPLACE_ROOT.",
+)
+
+
+def _machine(root: Path | None) -> Machine:
+    """The root an operator means. Nothing is created by asking about one.
+
+    A root that does not exist yet is a typo far more often than it is a new
+    machine, and `users` on a fresh empty directory says nothing useful.
+    """
+    if root is None:
+        typer.secho(
+            "Say which root with --root, or set APPLACE_ROOT.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if not root.exists():
+        typer.secho(f"No machine root at {root}.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    try:
+        found = Machine(root)
+        _ = found.limits  # read machine.yaml here: a bad file is one error, early
+    except MachineError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    return found
+
+
+@machine_app.command("users")
+def machine_users(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+) -> None:
+    """Everyone with a home here, and how much of it they are using."""
+    found = _machine(root)
+    people = found.users()
+    if not people:
+        typer.echo(f"No homes yet under {found.root}.")
+        return
+    limits = found.limits
+    for record in people:
+        typer.echo(
+            f"{record['user']}  {record['apps']} apps, "
+            f"{record['previews']} previewing, {record['disk_mb']} MB"
+            + (f" of {limits.disk_mb}" if limits.disk_mb is not None else "")
+        )
+        typer.echo(f"  {record['home']}")
+
+
+@machine_app.command("ports")
+def machine_ports(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+) -> None:
+    """Who holds which port, across every home (D21)."""
+    found = _machine(root)
+    holds = found.ports()
+    if not holds:
+        typer.echo("No port is held.")
+        return
+    for hold in holds:
+        pid = hold["pid"]
+        typer.echo(
+            f"{hold['port']}  {hold['kind']:<7} {hold['app']}  "
+            + (f"pid {pid}" if pid else "starting")
+        )
+        typer.echo(f"  {hold['home']}")
+
+
+@machine_app.command("gc")
+def machine_gc(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+    preview_hours: Annotated[
+        float,
+        typer.Option(
+            "--preview-hours", help="Stop previews nobody has touched for this long."
+        ),
+    ] = 2.0,
+    scratch_hours: Annotated[
+        float,
+        typer.Option(
+            "--scratch-hours", help="Remove scratch checkouts older than this."
+        ),
+    ] = 24.0,
+) -> None:
+    """Stop what nobody is watching and free what nobody is holding (D23).
+
+    Never deletes an app, a repository, a secret or a home. Safe on a cron.
+    """
+    found = _machine(root)
+    report = found.gc(preview_hours=preview_hours, scratch_hours=scratch_hours)
+    for stopped in report["previews_stopped"]:
+        typer.echo(f"Stopped {stopped['app']} ({stopped['user']})")
+    typer.echo(
+        f"{len(report['previews_stopped'])} previews stopped, "
+        f"{report['ports_released']} ports released, "
+        f"{report['scratch_removed']} scratch checkouts removed"
+    )
 
 
 def main() -> None:

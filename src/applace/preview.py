@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import machine
 from .db import (
     Connection,
     claimed_ports,
@@ -199,7 +200,7 @@ def start(
     if command_template is None:  # pragma: no cover - `dev` is required of a stack
         raise PreviewError(f"the {stack.name} stack declares no dev command")
 
-    chosen = port if port is not None else _free_port(conn)
+    chosen = port if port is not None else _free_port(paths, conn, slug)
     if port is not None and not port_is_free(port):
         raise PreviewError(f"port {port} is already in use by something else.")
     command = command_template.format(port=chosen, host=HOST)
@@ -208,6 +209,9 @@ def start(
     log_path = paths.app_logs(slug) / LOG_NAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
     pid = spawn(command, cwd=root, log_path=log_path, environment=environment)
+    # The machine's ledger holds the port for this process; until it knows the
+    # pid the claim is on a grace timer (D21).
+    machine.started(paths, chosen, pid)
 
     upsert_preview(
         conn,
@@ -374,12 +378,26 @@ def _wait_until_ready(url: str, pid: int) -> bool:
     return False
 
 
-def _free_port(conn: Connection) -> int:
-    """A port nothing else on this machine, and no other app, is using."""
+def _free_port(paths: ApplacePaths, conn: Connection, slug: str) -> int:
+    """A port nothing else on this machine, and no other app, is using.
+
+    On a machine serving several homes the ledger arbitrates: the claim and the
+    probe happen inside one transaction, so two homes starting a dev server at
+    the same instant cannot be handed the same port (D21). On an ordinary
+    single-user machine there is nobody to arbitrate with, and the probe below
+    is the whole answer.
+    """
     claimed = claimed_ports(conn)
-    for candidate in PORT_RANGE:
-        if candidate not in claimed and port_is_free(candidate):
-            return candidate
+    candidates = [port for port in PORT_RANGE if port not in claimed]
+    brokered = machine.claim(
+        paths, candidates, slug=slug, kind="preview", free=port_is_free
+    )
+    if brokered is not None:
+        return brokered
+    if paths.ledger is None:
+        for candidate in candidates:
+            if port_is_free(candidate):
+                return candidate
     raise PreviewError(
         f"no free port between {PORT_RANGE.start} and {PORT_RANGE.stop - 1}. "
         f"Stop a preview before starting another."

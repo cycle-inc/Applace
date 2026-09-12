@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import env, gitrepo, policy as policy_module, preview, shell, vercel
+from . import env, gitrepo, machine, policy as policy_module, preview, shell, vercel
 from .db import (
     Connection,
     claimed_ports,
@@ -212,12 +212,13 @@ class LocalTarget:
             )
             request.conn.commit()
 
-        port = _free_port(request.conn)
+        port = _free_port(request.paths, request.conn, request.app)
         command = (
             f"{sys.executable} -m applace.static "
             f"--root {served} --host {preview.HOST} --port {port}"
         )
         pid = preview.spawn(command, cwd=served, log_path=request.log)
+        machine.started(request.paths, port, pid)
         url = f"http://{preview.HOST}:{port}/"
         if not _wait_until_ready(url, pid):
             preview.terminate(pid)
@@ -791,16 +792,27 @@ def _previous_commit(conn: Connection, row: Any, live: Any) -> str | None:
     return None
 
 
-def _free_port(conn: Connection) -> int:
-    """A port no preview and no other deployment on this machine is holding."""
+def _free_port(paths: ApplacePaths, conn: Connection, slug: str) -> int:
+    """A port no preview and no other deployment on this machine is holding.
+
+    Under a root, "this machine" means every home on it, and the ledger is what
+    makes that true rather than hopeful (D21).
+    """
     taken = claimed_ports(conn) | {
         int(detail["port"])
         for detail in (_detail(row) for row in live_deployments(conn))
         if isinstance(detail.get("port"), int)
     }
-    for candidate in PORT_RANGE:
-        if candidate not in taken and preview.port_is_free(candidate):
-            return candidate
+    candidates = [port for port in PORT_RANGE if port not in taken]
+    brokered = machine.claim(
+        paths, candidates, slug=slug, kind="deploy", free=preview.port_is_free
+    )
+    if brokered is not None:
+        return brokered
+    if paths.ledger is None:
+        for candidate in candidates:
+            if preview.port_is_free(candidate):
+                return candidate
     raise DeployError(
         f"no free port between {PORT_RANGE.start} and {PORT_RANGE.stop - 1}. "
         f"Stop a deployment before starting another."

@@ -9,8 +9,17 @@ the developer embedding it in a backend (D17).
     ap = Applace()
     made = ap.create("Team Dashboard")
     ap.write(made["app"], {"src/App.tsx": code})
+
+A backend serving more than one person gives each of them their own home under
+a root, and gets the machine's arbitration -- ports, quotas, collection -- with
+it (D20):
+
+    from applace import Machine
+
+    ap = Machine("/srv/applace").user("alice@example.com")
 """
 
 from .api import Applace
+from .machine import Limits, Machine
 
-__all__ = ["Applace"]
+__all__ = ["Applace", "Machine", "Limits"]
