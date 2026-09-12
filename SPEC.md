@@ -64,6 +64,9 @@ Three things, and they are the whole product:
 | **D14** | **v1 apps are front ends.** A generated app is a browser application that talks to APIs that already exist; the stack supplies the client and the base URL. No database, no server runtime, no BaaS. A full-stack stack is a v2 question and is not to be anticipated in v1 code. |
 | **D15** | **A handover is a branch and a pull request, not a different repository.** A machine can be connected in review mode: every app's commits go to `applace/<slug>` and one pull request stays open against the default branch, so nothing an agent wrote reaches `main` without a person merging it. The agent is given the pull request URL and told to hand it over; it never merges, and there is no Applace command that does. The mirror of it holds too: a person's uncommitted edit in the working tree refuses the agent's write, because `write_files` replaces whole files and theirs exists nowhere else. |
 | **D16** | **The chat window is a first-class client, and it reads the same journal as the agent.** A company already has a chatbot; Applace is what goes under it. So the same server that answers the MCP tools also answers, on the same port, a read-only view of what is happening — one card per app, one event stream, the last screenshot — and ships an embeddable component that needs no build step in the host. A chat UI never re-implements the journal, never polls git, and never needs a second port, a second process or a second set of credentials. |
+| **D17** | **The package is the fourth door.** Applace ships three ways in: a CLI for a human at a terminal, an MCP server for an agent, a `SKILL.md` for the model that reads it. The developer putting Applace under their company's chatbot has none of the three — they have a Python process. `from applace import Applace` is the same store, the same gate and the same journal, called directly, and the MCP server becomes one caller of it rather than the only door. Every method returns a plain dict with `ok`, `code`, `error` and `hint`, and none raises because a build went red: that is the convention everywhere else and it is right here too, whether the reader is a model or a web handler. |
+| **D18** | **Every method is synchronous.** Applace's slow calls are subprocesses — npm, tsc, vite, a browser — not sockets. A coroutine whose body is `asyncio.to_thread` claims a concurrency it does not have and colours every caller for nothing; the MCP SDK already runs sync tools on a worker thread, which is why `create_app` and `write_files` are declared sync there. An async backend writes `await asyncio.to_thread(ap.write, ...)` — one line, at the only place that knows its own event loop. |
+| **D19** | **The developer's half of the API is not a tool, and never becomes one.** Two things exist only because a person is answerable for them: supplying the **value** of a secret (D8), and connecting this machine to a GitHub organisation, a Vercel account or a company stack (D2b, D6, D7). They are methods on the class and they are not MCP tools — the same principle as Runlace's `approve`: an agent that could do them would be authorising itself. And no method returns a value; `env()` lists names and whether each one has been supplied. |
 
 ## Directory layout (user machine)
 
@@ -521,3 +524,49 @@ And a test lesson with teeth: **Starlette's `TestClient` buffers a response
 whole**, so an endless stream never returns its headers — the events generator is
 therefore a function that can be read directly, and the HTTP end of it is what
 the acceptance script exercises.
+
+**M11 — The package.** *Shipped.* `from applace import Applace` (D17): one class
+over the same store, the same gate and the same journal the MCP server uses, for
+the developer who is embedding Applace in a backend rather than talking to it
+from a terminal or an agent.
+
+It has two halves, and the line between them is the point of the milestone.
+
+1. **What an agent does**, method for tool, answer for answer: `skill`,
+   `stacks`, `create`, `apps`, `app`, `read`, `write`, `declare_env`, `preview`,
+   `stop_preview`, `shot`, `deploy`, `rollback`. The MCP server is rewritten as
+   a skin over them — the tool docstrings stay, because the docstrings *are* the
+   model's interface, but nothing behind them is implemented twice, so the two
+   doors cannot drift.
+2. **What only the deployment does** (D19): `set_env` with a *value*, `env`,
+   `unset_env`, `connect_github`, `github`, `adopt`, `push`, `connect_vercel`,
+   `vercel`, `install_stack`, `update_stack`, `installed_stacks`, `drift`,
+   `policy`, `deployments`, `card`, `cards`, `remove`. None of these is an MCP
+   tool and none ever will be. `card` and `cards` are the panel's own fold-down
+   (D16) without the HTTP: a product that renders its own UI should not have to
+   call its own harness over a socket.
+
+Everything is synchronous (D18) and everything returns a dict.
+
+*Acceptance:* `scripts/m11_acceptance.sh` — one Python process, one temporary
+home: the class creates an app, a red write comes back with the failing stage and
+its diagnostics and commits nothing, the green one commits, `card()` is byte-for-
+byte what the panel serves over HTTP, a secret value set through `set_env`
+reaches the app's env file at `0600` while no method anywhere returns it, and the
+same question asked through the MCP server and through the class gives the same
+answer.
+
+What M11 learned. **The second door tells you where the first one leaked.**
+Writing the class meant naming every behaviour once, and the public-repository
+gate (D6) turned out to live inside a CLI command — a backend embedding Applace
+would have re-implemented a policy decision, or forgotten it. It now lives in
+`connect_github`, and `applace github connect` calls that: the terminal's own
+part is asking the question out loud, not knowing the rule. **A value and a name
+are different verbs.** The MCP tool `set_env` declares a name; the method
+`set_env` supplies a value, and they share a name in two doors that must never
+share a caller, so the agent-facing one is called `declare_env` here and the
+docstrings say why on both sides. **The envelope is part of the answer.** The
+first `card()` came back without the `ok` the panel's HTTP route adds, so the
+same card had two shapes depending on the door — a difference nobody would have
+noticed until a caller switched doors. The class carries it now, and the
+acceptance compares the two byte for byte.

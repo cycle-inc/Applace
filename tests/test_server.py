@@ -277,7 +277,7 @@ def test_screenshot_app_sends_back_the_picture_and_the_report(
     The browser is faked here on purpose: what is under test is the shape of the
     MCP result, not Chromium. test_eyes.py drives the real thing.
     """
-    import applace.server as server_module
+    import applace.apps as apps_module
     from applace.eyes import ConsoleMessage, Shot
 
     paths, _ = home
@@ -291,9 +291,7 @@ def test_screenshot_app_sends_back_the_picture_and_the_report(
         console=[ConsoleMessage(level="error", text="TypeError: boom")],
         text_length=0,
     )
-    monkeypatch.setattr(
-        server_module, "screenshot_for", lambda *a, **k: (picture, True)
-    )
+    monkeypatch.setattr(apps_module, "screenshot", lambda *a, **k: (picture, True))
 
     result = asyncio.run(server.call_tool("screenshot_app", {"app": "team-dashboard"}))
     assert isinstance(result, CallToolResult), result

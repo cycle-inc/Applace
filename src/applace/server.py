@@ -3,35 +3,27 @@
 What an agent talks to. Every tool returns structured JSON and every docstring
 is written for a model to read, because the docstrings *are* the interface.
 
+Behind them there is no second implementation: each tool calls the method of the
+same name on :class:`applace.api.Applace` (D17), so the agent's door and the
+developer's door cannot answer the same question differently. What lives here is
+what is genuinely the server's own -- the wording an agent reads, the argument
+names it sees, and the one tool whose result is a picture as well as a report.
+
 Each call opens its own SQLite connection: MCP hosts call tools concurrently and
 sqlite3 connections are not shared across threads.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from mcp.server.mcpserver import Image, MCPServer
 
-from . import gate, panel, skill
-from .apps import AppError, app_detail, app_summary, create_app, require_app
-from .apps import declare_env as declare_env_for
-from .apps import deploy_app as deploy_app_for
-from .apps import rollback_app as rollback_app_for
-from .apps import screenshot as screenshot_for
-from .apps import start_preview as start_preview_for
-from .apps import stop_preview as stop_preview_for
-from .db import Connection, connect
-from .db import list_apps as db_list_apps
-from .deploy import LOCAL, PREVIEW, DeployError, DeployRefused
-from .env import EnvError
-from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable
-from .gitrepo import GitError
-from .preview import PreviewError
-from .naming import InvalidName
-from .paths import ApplacePaths, paths as default_paths
-from .stacks import StackError, registry
+from . import panel
+from .api import Applace
+from .deploy import LOCAL, PREVIEW
+from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH
+from .paths import ApplacePaths
 
 SERVER_NAME = "applace"
 
@@ -60,16 +52,9 @@ and it says what this particular machine is set up to do.
 
 def build_server(paths: ApplacePaths | None = None) -> MCPServer:
     """Create the MCP server. ``paths`` is injectable so tests can isolate it."""
-    home = paths or default_paths()
+    applace = Applace(paths)
+    home = applace.paths
     server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS)
-
-    @contextmanager
-    def session() -> Iterator[Connection]:
-        conn = connect(home.db)
-        try:
-            yield conn
-        finally:
-            conn.close()
 
     @server.tool()
     def get_skill() -> dict[str, Any]:
@@ -83,7 +68,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         Read it once per session. It is cheaper than a red build.
         """
-        return {"ok": True, **skill.describe(home)}
+        return applace.skill()
 
     @server.tool()
     def list_stacks() -> dict[str, Any]:
@@ -97,14 +82,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         `entry` is the file to start reading and editing. `env_prefix` is what a
         variable name must start with to reach the browser.
         """
-        try:
-            available = registry(home.stacks)
-        except StackError as exc:
-            return {"ok": False, "error": str(exc)}
-        return {
-            "ok": True,
-            "stacks": [stack.summary() for stack in available.values()],
-        }
+        return applace.stacks()
 
     # Deliberately sync: this shells out to npm for minutes. The SDK runs sync
     # tools on a worker thread, which is what keeps the server answering other
@@ -129,16 +107,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         On failure `code` is invalid-name, app-exists or unknown-stack.
         """
-        with session() as conn:
-            try:
-                report = _create(home, conn, name, stack, description)
-            except InvalidName as exc:
-                return {"ok": False, "code": "invalid-name", "error": str(exc)}
-            except StackError as exc:
-                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
-            except AppError as exc:
-                return {"ok": False, "code": "app-exists", "error": str(exc)}
-            return {"ok": True, **report.as_dict()}
+        return applace.create(name, stack=stack, description=description)
 
     @server.tool()
     def list_apps() -> dict[str, Any]:
@@ -148,11 +117,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         that is, work that was written but did not pass the build. `commit` is
         the last change Applace committed.
         """
-        with session() as conn:
-            return {
-                "ok": True,
-                "apps": [app_summary(conn, row) for row in db_list_apps(conn)],
-            }
+        return applace.apps()
 
     @server.tool()
     def get_app(app: str) -> dict[str, Any]:
@@ -168,12 +133,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         On failure `code` is unknown-app.
         """
-        with session() as conn:
-            try:
-                row = require_app(conn, app)
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            return {"ok": True, **app_detail(home, conn, row)}
+        return applace.app(app)
 
     # Sync: starting a dev server waits for it to answer, which is seconds.
     @server.tool()
@@ -188,16 +148,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         On failure `code` is unknown-app or preview-failed; `error` then carries
         the end of the dev server's own log.
         """
-        with session() as conn:
-            try:
-                running = start_preview_for(home, conn, app)
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except StackError as exc:
-                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
-            except PreviewError as exc:
-                return {"ok": False, "code": "preview-failed", "error": str(exc)}
-            return {"ok": True, **running.as_dict()}
+        return applace.preview(app)
 
     @server.tool()
     def stop_preview(app: str) -> dict[str, Any]:
@@ -205,12 +156,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         `stopped` is false when nothing was running, which is not an error.
         """
-        with session() as conn:
-            try:
-                stopped = stop_preview_for(conn, app)
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            return {"ok": True, "app": app, "stopped": stopped}
+        return applace.stop_preview(app)
 
     # Sync: this drives a browser, which is seconds.
     @server.tool()
@@ -237,25 +183,16 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         running. On failure `code` is unknown-app, preview-failed or
         eyes-unavailable.
         """
-        with session() as conn:
-            try:
-                shot, started = screenshot_for(
-                    home, conn, app,
-                    route=route, width=width, height=height, full_page=full_page,
-                )
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except PreviewError as exc:
-                return {"ok": False, "code": "preview-failed", "error": str(exc)}
-            except EyesUnavailable as exc:
-                return {"ok": False, "code": "eyes-unavailable", "error": str(exc)}
+        answer = applace.shot(
+            app, route=route, width=width, height=height, full_page=full_page
+        )
+        png = answer.pop("png", None)
+        if not answer.get("ok") or not isinstance(png, bytes):
+            return answer
         # A list, not a dict: the image has to reach the model as an image, and
         # that costs the structured-content half of the result. The JSON goes
         # alongside it as text, which is what every host renders anyway.
-        return [
-            Image(data=shot.png, format="png"),
-            {"ok": True, "app": app, "started_preview": started, **shot.report()},
-        ]
+        return [Image(data=png, format="png"), answer]
 
     @server.tool()
     def read_files(app: str, paths: list[str]) -> dict[str, Any]:
@@ -267,11 +204,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         On failure `code` is unknown-app.
         """
-        with session() as conn:
-            try:
-                return {"ok": True, **gate.read(home, conn, app=app, paths_to_read=paths)}
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+        return applace.read(app, paths)
 
     # Sync for the same reason create_app is: this runs a build.
     @server.tool()
@@ -311,23 +244,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         On failure `code` is unknown-app or unknown-stack.
         """
-        with session() as conn:
-            try:
-                report = gate.write_files(
-                    home,
-                    conn,
-                    app=app,
-                    files_to_write=files,
-                    delete=delete,
-                    message=message,
-                )
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except StackError as exc:
-                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
-            except GitError as exc:
-                return {"ok": False, "code": "git-failed", "error": str(exc)}
-            return report.as_dict()
+        return applace.write(app, files=files, delete=delete, message=message)
 
     @server.tool()
     def set_env(app: str, name: str, description: str | None = None) -> dict[str, Any]:
@@ -348,16 +265,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
 
         On failure `code` is unknown-app or invalid-name.
         """
-        with session() as conn:
-            try:
-                return {
-                    "ok": True,
-                    **declare_env_for(home, conn, app, name=name, description=description),
-                }
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except EnvError as exc:
-                return {"ok": False, "code": "invalid-name", "error": str(exc)}
+        return applace.declare_env(app, name, description=description)
 
     # Sync: a deploy builds, and a provider build is minutes.
     @server.tool()
@@ -388,22 +296,13 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         On failure `code` is unknown-app, unknown-stack, confirm-required,
         policy, unsupported-target, not-pushed, or deploy-failed.
         """
-        with session() as conn:
-            try:
-                report = deploy_app_for(
-                    home, conn, app,
-                    target=target, environment=environment,
-                    commit=commit, confirm=confirm,
-                )
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except StackError as exc:
-                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
-            except DeployRefused as exc:
-                return exc.as_dict()
-            except DeployError as exc:
-                return {"ok": False, "code": "deploy-failed", "error": str(exc)}
-            return report.as_dict()
+        return applace.deploy(
+            app,
+            target=target,
+            environment=environment,
+            commit=commit,
+            confirm=confirm,
+        )
 
     @server.tool()
     def rollback_app(
@@ -422,36 +321,12 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         On failure `code` is unknown-app, never-deployed, no-earlier-deployment,
         unknown-commit, confirm-required, policy or deploy-failed.
         """
-        with session() as conn:
-            try:
-                report = rollback_app_for(home, conn, app, commit=commit, confirm=confirm)
-            except AppError as exc:
-                return {"ok": False, "code": "unknown-app", "error": str(exc)}
-            except StackError as exc:
-                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
-            except DeployRefused as exc:
-                return exc.as_dict()
-            except DeployError as exc:
-                return {"ok": False, "code": "deploy-failed", "error": str(exc)}
-            return report.as_dict()
+        return applace.rollback(app, commit=commit, confirm=confirm)
 
     # The chat window's half of the same server (D16). Read-only, and inert on
     # stdio -- an HTTP route nobody can reach costs nothing.
     panel.attach(server, home)
     return server
-
-
-def _create(
-    home: ApplacePaths,
-    conn: Connection,
-    name: str,
-    stack: str | None,
-    description: str | None,
-) -> Any:
-    """Named so the tool above can shadow ``create_app`` without recursing."""
-    return create_app(
-        home, conn, name=name, stack_name=stack, description=description
-    )
 
 
 def serve(

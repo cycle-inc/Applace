@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from importlib import metadata
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from . import deploy as deployment
 from . import env as env_store
 from . import gate, policy, skill
+from .api import Applace
 from .apps import (
     AppError,
     app_detail,
@@ -48,7 +49,6 @@ from .github import (
 )
 from .github import api as github_api
 from .github import load as github_load
-from .github import save as github_save
 from .github import token as github_token
 from .init_cmd import InitReport, run_init
 from .naming import InvalidName
@@ -744,42 +744,40 @@ def github_connect(
             err=True,
         )
         raise typer.Exit(code=1)
-    # D6: making code visible is the gated act. Here it is gated once, at the
-    # only moment a human is definitely present -- and a company that has
-    # written a policy can take even that choice off the table (D9).
-    if visibility == "public":
-        try:
-            rule = policy.load(paths).public_repositories
-        except policy.PolicyError as exc:
-            typer.secho(str(exc), fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=1) from exc
-        if rule == "deny":
-            typer.secho(
-                f"{paths.policy} forbids public repositories on this machine. "
-                f"Connect with --visibility private or internal.",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        if rule == "confirm" and not yes:
-            typer.confirm(
-                f"Every app Applace creates in {org} will be a PUBLIC repository, "
-                f"readable by anyone on the internet. Continue?",
-                abort=True,
-                default=False,
-            )
 
-    link = GitHubLink(
-        org=org,
-        visibility=visibility,
-        prefix=prefix,
-        team=team,
-        host=host,
-        user=user,
-        review=review,
-        api_base=api_base,
-    )
-    github_save(paths, link)
+    # D6 lives in the class, not here: making code visible is gated once, and a
+    # backend embedding Applace gets the same gate without re-deciding it (D17).
+    # What is the terminal's own is asking the question out loud.
+    connect = Applace(paths).connect_github
+    settings: dict[str, Any] = {
+        "visibility": visibility,
+        "prefix": prefix,
+        "team": team,
+        "host": host,
+        "user": user,
+        "review": review,
+        "api_base": api_base,
+    }
+    answer = connect(org, **settings, confirm=yes)
+    if answer.get("code") == "confirm-required":
+        typer.confirm(
+            f"Every app Applace creates in {org} will be a PUBLIC repository, "
+            f"readable by anyone on the internet. Continue?",
+            abort=True,
+            default=False,
+        )
+        answer = connect(org, **settings, confirm=True)
+    if not answer.get("ok"):
+        message = str(answer.get("error", "could not connect"))
+        hint = answer.get("hint")
+        typer.secho(
+            f"{message} {hint}" if hint else message, fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+
+    link = github_load(paths)
+    if link is None:  # pragma: no cover -- it was just saved
+        raise typer.Exit(code=1)
     typer.echo(f"Connected {org} on {host} ({visibility})")
     if prefix:
         typer.echo(f"  repositories will be named {prefix}<slug>")

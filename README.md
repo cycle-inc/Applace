@@ -25,7 +25,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M10 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M11 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -36,10 +36,12 @@ deployment (a commit served from this machine or shipped to Vercel through its
 own repository, with production gated on a human), company stacks (installed
 from git, pinned to a commit, with the drift reported rather than applied), the
 handover (a pull request a person merges, a refusal to write over what they
-are editing, and `applace open`), and the chat window (a read-only panel on the
+are editing, and `applace open`), the chat window (a read-only panel on the
 same port, a live card per app, and the one script tag a company's own chatbot
-embeds). [SPEC.md](SPEC.md) records why each of those is the way it is, and what
-each milestone taught.
+embeds), and the package (`from applace import Applace`, the same behaviours as
+a Python class, with the MCP server rewritten as a skin over it).
+[SPEC.md](SPEC.md) records why each of those is the way it is, and what each
+milestone taught.
 
 ### Try it
 
@@ -268,6 +270,41 @@ Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
 the one to call first: it returns the skill document plus what this particular
 machine does — which stacks it has, whether it pushes to GitHub, what the policy
 allows, and where it can deploy.
+
+### From your own Python
+
+The fourth door (D17). Same store, same gate, same journal — no server to run,
+no socket, no MCP client:
+
+```python
+from applace import Applace
+
+ap = Applace()                                   # or Applace("/srv/applace")
+made = ap.create("Team Dashboard")               # installed, built, committed
+app = made["app"]
+
+written = ap.write(app, {"src/App.tsx": code}, message="First screen")
+if not written["ok"]:
+    print(written["stage"], written["errors"])   # a result, never an exception
+
+ap.preview(app)["url"]                           # a URL to put in an iframe
+ap.card(app)                                     # exactly what /panel/apps/<slug> serves
+ap.deploy(app, target="local")["url"]
+```
+
+Every method is synchronous and returns a dict with `ok` in it (D18): a failure
+is `{"ok": False, "code": ..., "error": ...}`, so a web handler never has to
+catch anything. The agent's thirteen methods mirror the tools one for one —
+`skill`, `stacks`, `create`, `apps`, `app`, `read`, `write`, `declare_env`,
+`preview`, `stop_preview`, `shot`, `deploy`, `rollback` — and the MCP server
+calls exactly those, so the two doors cannot answer the same question
+differently.
+
+The class also has what an agent must never have (D19): `set_env` with a
+*value*, `connect_github`, `connect_vercel`, `push`, `adopt`, `install_stack`,
+`remove`, and the panel's `card`/`cards` without the HTTP. None of those is a
+tool, and none ever will be — a secret value and a connection are the
+deployment's to decide, not the model's.
 
 ### Inside your own chatbot
 

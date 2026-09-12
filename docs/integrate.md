@@ -114,6 +114,43 @@ nothing Applace-specific in it. The gate is what makes that loop safe — a writ
 that does not typecheck, lint and build comes back red with the errors and
 nothing is committed, so the model's next turn is a fix rather than a fiction.
 
+**Or skip the socket.** If your backend is Python and Applace runs in the same
+process, import it instead of connecting to it (D17). The MCP server is a skin
+over this class, so the behaviour is identical — same store, same gate, same
+journal:
+
+```python
+from applace import Applace
+
+ap = Applace()                                  # or Applace("/srv/applace")
+
+TOOLS = {                                       # what you offer the model
+    "create_app": lambda name, **rest: ap.create(name, **rest),
+    "get_app": ap.app,
+    "read_files": ap.read,
+    "write_files": ap.write,
+    "screenshot_app": ap.shot,
+    "deploy_app": ap.deploy,
+}
+system = json.dumps(ap.skill())                 # the same system prompt
+```
+
+Everything is synchronous and returns a dict with `ok` in it (D18) — a red
+write is `{"ok": False, "stage": "typecheck", "errors": [...]}`, not an
+exception, so a request handler never has to catch anything. `ap.shot()` puts
+the PNG in `png` as bytes: pop it out and send it as an image, exactly as you
+would with the tool result.
+
+You still have to write the tool schemas yourself, which is the one thing the
+MCP door gives you for free — so take this road when you already know the six
+or seven verbs your product exposes, and the MCP road when you are handing the
+whole harness to somebody else's agent. What the class adds is the other half,
+the one that is deliberately not a tool (D19): `ap.set_env(app, name, value)`
+for a secret your backend already holds, `ap.connect_github(org)`,
+`ap.connect_vercel(...)`, `ap.card(slug)` for the panel's card with no HTTP.
+Those are the deployment's decisions, and no model should be able to make
+them.
+
 ## 3. Show the app
 
 The person who asked is not going to read a tool result. Put the app in the
