@@ -9,8 +9,9 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M9 are shipped.** Every milestone in this document is built,
-> tested and accepted; what comes next is a v2 question.
+> **Status: M1 to M10 are shipped** — the whole harness a developer drives, and
+> the panel that puts it inside a chat window, which is where a company's users
+> actually are.
 
 ## What v1 is
 
@@ -62,6 +63,7 @@ Three things, and they are the whole product:
 | **D13** | **The remote wins.** If the GitHub repository has moved ahead of the local tree — a human pushed, another machine pushed — the snapshot is refused and the divergence is reported. Applace never force-pushes and never rewrites history. |
 | **D14** | **v1 apps are front ends.** A generated app is a browser application that talks to APIs that already exist; the stack supplies the client and the base URL. No database, no server runtime, no BaaS. A full-stack stack is a v2 question and is not to be anticipated in v1 code. |
 | **D15** | **A handover is a branch and a pull request, not a different repository.** A machine can be connected in review mode: every app's commits go to `applace/<slug>` and one pull request stays open against the default branch, so nothing an agent wrote reaches `main` without a person merging it. The agent is given the pull request URL and told to hand it over; it never merges, and there is no Applace command that does. The mirror of it holds too: a person's uncommitted edit in the working tree refuses the agent's write, because `write_files` replaces whole files and theirs exists nowhere else. |
+| **D16** | **The chat window is a first-class client, and it reads the same journal as the agent.** A company already has a chatbot; Applace is what goes under it. So the same server that answers the MCP tools also answers, on the same port, a read-only view of what is happening — one card per app, one event stream, the last screenshot — and ships an embeddable component that needs no build step in the host. A chat UI never re-implements the journal, never polls git, and never needs a second port, a second process or a second set of credentials. |
 
 ## Directory layout (user machine)
 
@@ -74,6 +76,7 @@ Three things, and they are the whole product:
   apps/<slug>/             # the app itself: an ordinary git repository (D1)
   env/<slug>.env           # secret values, outside the repository (D8)
   logs/<slug>/             # dev server and build logs
+  shots/<slug>.png         # the last screenshot, for the chat window (D16)
 ```
 
 ## The stack contract
@@ -164,8 +167,8 @@ env_vars(app_id, name, description, created_at)             -- names only (D8)
 ```
 
 The tables arrive by append-only migration, never by editing the statement above:
-`gates` in v2, `previews` in v3, `snapshots.pushed_at` in v4, `env_vars` in v5 and
-`deployments` in v6.
+`gates` in v2, `previews` in v3, `snapshots.pushed_at` in v4, `env_vars` in v5,
+`deployments` in v6 and `apps.pull_request_url` in v7.
 
 `gates` and `deployments` are simultaneously the audit log, the debug trace and the
 answer to "why is this app in the state it is in". Never skip journaling to save
@@ -173,8 +176,9 @@ time.
 
 ## Out of scope for v1 (explicit, so the coding agent does not drift)
 
-Multi-tenancy and user accounts; a web UI of Applace's own (an MCP chat host is the
-UI, as with Runlace); mobile and React Native; a database or server runtime for
+Multi-tenancy and user accounts; a web UI of Applace's own that can *do* anything
+(an MCP chat host is the UI, as with Runlace — the M10 panel reads the journal and
+writes nothing, D16); mobile and React Native; a database or server runtime for
 generated apps (D14); authentication *inside* generated apps beyond what a company
 stack provides; billing; real-time collaboration; any deploy target other than the
 two named in M7.
@@ -419,3 +423,71 @@ fatal: the commits are already pushed and a human can open it by hand.
 in a chat window; the person wants the thing itself, and which of four addresses
 an app currently has is a question the journal can answer and a human should not
 have to.
+
+**M10 — An app in a chat window.** *Shipped.* Every large company now has a chatbot,
+and what its users ask for next is the thing Lovable does. M1–M9 built the engine
+for a developer at a terminal; M10 is what a developer bolts under a chatbot they
+already have, in an afternoon (D16).
+
+Five deliverables, in order:
+
+1. **The card.** `GET /panel/apps` and `GET /panel/apps/<slug>` on the same port
+   as the MCP tools: what an app is, what state it is in (building, red, green,
+   previewing, deployed), every address it has, its last gate with its errors,
+   its outstanding handover. One request, everything a chat message needs to
+   render.
+2. **The stream.** `GET /panel/apps/<slug>/events`, server-sent events, so a chat
+   window shows *typecheck → lint → build → commit → pushed → live* while it
+   happens instead of waiting a minute in silence. The journal is the source of
+   truth; the stream reports it and invents nothing.
+3. **The last screenshot** at `GET /panel/apps/<slug>/shot.png`, because the
+   proof that a page renders belongs next to the sentence that says it does.
+4. **The embed.** `GET /panel/embed.js` defines `<applace-app slug="…">`: a
+   framework-free custom element that draws the card, the live preview in an
+   iframe and the links. No npm package, no build step, no React version to
+   agree on — a company's chat UI includes one script tag.
+5. **The reference chatbot**, `examples/chat/`: a small, readable chat that
+   builds apps with these tools and embeds that component, plus
+   `docs/integrate.md` with the configuration lines for Claude Code, Cursor and
+   an OpenAI-compatible backend. It is the demo, and it is the documentation.
+
+Out of scope on purpose, and named so it is not smuggled in: identity. The panel
+is read-only and inherits the trust of the machine it runs on (D11). Who may see
+an app, and an SSO in front of what is deployed, is the next milestone's subject,
+not this one's.
+
+*Acceptance:* `scripts/m10_acceptance.sh` — against a real `applace serve --http`
+driven by a real MCP client over that same port: a card a chat can draw in one
+request with no git vocabulary in it, a stream opened *before* anything happens
+that reports the typecheck failure with its file and line and then the green
+commit without being asked, the preview URL in the card answering 200, the
+screenshot the agent took served as a PNG the card points at, a local deployment
+appearing as `urls.live`, an `embed.js` with a custom element and no import in
+it, a `/panel` page that uses the element it recommends, and
+`examples/chat/chat.py` standing up against that harness — reading the skill,
+serving a page that embeds the panel, and surviving a model that is not there.
+
+What M10 learned. **A chat window is a different reader, not a smaller one.**
+`get_app` is exhaustive because an agent is about to write code; a card is one
+state, one sentence and the links, because it is about to be rendered next to a
+person's question — the fold-down (`panel.card`) is the whole design, and the
+sentence is generated where the facts are rather than in the integrator's
+template. **A URL said once is a URL lost**: a pull request announced in a
+message that scrolled away an hour ago is a pull request nobody merges, which is
+why the PR URL is now a column (v7) rather than a line of output, and why the
+screenshot is written to `~/.applace/shots/<slug>.png` instead of only returned.
+**Polling the journal beat being notified by it.** A bus between the gate, the
+push and the deploy and a chat window would be a second account of the same
+facts, able to disagree with the first; half a second of latency is nothing next
+to a build stage, and the stream that only forwards what it read cannot invent a
+state the harness is not in. **The heartbeat is not a detail** — fifteen quiet
+seconds and a reverse proxy closes the connection, taking the build with it.
+**One port, or nobody integrates.** The panel is mounted on the MCP server's own
+app (`custom_route`), so what a company opens in its firewall is one address, and
+`applace serve` on stdio simply never fires those routes. **A custom element, not
+a component**: a chat UI is somebody else's bundler and somebody else's React
+version, and one script tag is the only integration that survives all of them.
+And a test lesson with teeth: **Starlette's `TestClient` buffers a response
+whole**, so an endless stream never returns its headers — the events generator is
+therefore a function that can be read directly, and the HTTP end of it is what
+the acceptance script exercises.

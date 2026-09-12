@@ -25,7 +25,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M9 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M10 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -34,10 +34,12 @@ repository in your organisation, and every green snapshot is pushed there), the
 skill (the document an agent reads, the dependency policy, and the secret path),
 deployment (a commit served from this machine or shipped to Vercel through its
 own repository, with production gated on a human), company stacks (installed
-from git, pinned to a commit, with the drift reported rather than applied), and
-the handover (a pull request a person merges, a refusal to write over what they
-are editing, and `applace open`). [SPEC.md](SPEC.md) records why each of those
-is the way it is, and what each milestone taught.
+from git, pinned to a commit, with the drift reported rather than applied), the
+handover (a pull request a person merges, a refusal to write over what they
+are editing, and `applace open`), and the chat window (a read-only panel on the
+same port, a live card per app, and the one script tag a company's own chatbot
+embeds). [SPEC.md](SPEC.md) records why each of those is the way it is, and what
+each milestone taught.
 
 ### Try it
 
@@ -236,12 +238,54 @@ uv run applace serve            # stdio
 uv run applace serve --http 8848
 ```
 
+Over HTTP the same port also serves the **panel** — the chat window's half of
+the harness (D16), read-only, reading the same journal the tools write to:
+
+```
+http://127.0.0.1:8848/mcp                        the tools
+http://127.0.0.1:8848/panel                      a page listing every app
+http://127.0.0.1:8848/panel/embed.js             the <applace-app> element
+http://127.0.0.1:8848/panel/apps/<slug>          one card, as JSON
+http://127.0.0.1:8848/panel/apps/<slug>/events   that card, whenever it changes
+http://127.0.0.1:8848/panel/apps/<slug>/shot.png the last screenshot
+```
+
+Putting an app in your own chat is one script tag and one element:
+
+```html
+<script src="http://127.0.0.1:8848/panel/embed.js"></script>
+<applace-app slug="team-dashboard" base="http://127.0.0.1:8848" height="520">
+</applace-app>
+```
+
+It draws the state, the sentence, the errors and the links, embeds the live
+preview, and keeps itself up to date while the build runs — no npm package, no
+build step, no React version to agree on.
+
 Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
 `get_app`, `read_files`, `write_files`, `set_env`, `start_preview`,
 `stop_preview`, `screenshot_app`, `deploy_app`, `rollback_app`. `get_skill` is
 the one to call first: it returns the skill document plus what this particular
 machine does — which stacks it has, whether it pushes to GitHub, what the policy
 allows, and where it can deploy.
+
+### Inside your own chatbot
+
+Your company has a chatbot already. Applace is what goes underneath it so its
+users can ask it for an app — the tools, `get_skill` as the system prompt, and
+the panel for the app itself.
+
+```bash
+uv run applace serve --http 8848 &
+uv run examples/chat/chat.py --model mistral-large-latest   # then open :8900
+```
+
+`examples/chat/chat.py` is one readable file: a chat that builds apps and shows
+them being built. [`docs/integrate.md`](docs/integrate.md) is the same thing as
+instructions — the configuration lines for Claude Code, Cursor and an
+OpenAI-compatible backend, the card's shape, the element's attributes, and what
+to be careful about (loops cost money; the panel is read-only but not private;
+secrets stay out of the conversation; let the humans merge).
 
 ### Design
 
@@ -250,7 +294,8 @@ app is an ordinary repository (D1), that versioning is git and the remote is
 GitHub (D2), that `write_files` is a compiler (D3), that a red write is accepted
 but not committed (D4), that the gate is on exposure rather than on writing
 (D6), that secrets never enter the model's context (D8), that a handover is a
-branch and a pull request rather than a different repository (D15). Read that document
+branch and a pull request rather than a different repository (D15), that the chat
+window is a read-only client of the same journal on the same port (D16). Read that document
 before changing behaviour; it is also the roadmap.
 
 ### License

@@ -14,7 +14,7 @@ from typing import Any, Iterator
 
 from mcp.server.mcpserver import Image, MCPServer
 
-from . import gate, skill
+from . import gate, panel, skill
 from .apps import AppError, app_detail, app_summary, create_app, require_app
 from .apps import declare_env as declare_env_for
 from .apps import deploy_app as deploy_app_for
@@ -435,6 +435,9 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
                 return {"ok": False, "code": "deploy-failed", "error": str(exc)}
             return report.as_dict()
 
+    # The chat window's half of the same server (D16). Read-only, and inert on
+    # stdio -- an HTTP route nobody can reach costs nothing.
+    panel.attach(server, home)
     return server
 
 

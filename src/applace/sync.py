@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import github, gitrepo
-from .db import Connection, mark_pushed, set_github, unpushed
+from .db import Connection, mark_pushed, set_github, set_pull_request, unpushed
 from .github import GitHubError, GitHubLink, NotConnected, PullRequest, Repository
 from .paths import ApplacePaths
 
@@ -66,6 +66,10 @@ class PushReport:
     reviewed: bool = False
     base: str | None = None
     pull_request: PullRequest | None = None
+    # GitHub answered, and there is no open pull request to answer with: the
+    # branch holds nothing the base does not, which is what a merge looks like
+    # from here. Distinct from "we could not ask", which must not forget a URL.
+    nothing_to_propose: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -220,6 +224,16 @@ def push_app(paths: ApplacePaths, conn: Connection, row: Any) -> PushReport:
 
     if report.reviewed:
         _propose(link, report, row, head=branch, base=base)
+        # Remembered, not re-asked: the URL arrives once, in this report, and a
+        # chat window an hour later still has to be able to draw it.
+        if report.pull_request is not None:
+            set_pull_request(conn, str(row["id"]), report.pull_request.html_url)
+            conn.commit()
+        elif report.nothing_to_propose:
+            # It was merged, or closed by the person it was handed to. Pointing
+            # at it afterwards would be pointing at somebody else's decision.
+            set_pull_request(conn, str(row["id"]), None)
+            conn.commit()
     return report
 
 
@@ -250,6 +264,7 @@ def _propose(
         )
         return
     if report.pull_request is None:
+        report.nothing_to_propose = True
         report.reason = (
             f"{head} holds nothing that {base} does not, so there is nothing to "
             f"propose yet."

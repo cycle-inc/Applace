@@ -1239,9 +1239,17 @@ def serve(
         str, typer.Option("--host", help="Interface to bind when serving over HTTP.")
     ] = "127.0.0.1",
 ) -> None:
-    """Expose this home to an MCP host. Stdio unless --http is given."""
+    """Expose this home to an MCP host. Stdio unless --http is given.
+
+    Over HTTP the same port also serves the panel (D16): `/panel` for a page a
+    human can watch, `/panel/embed.js` for the `<applace-app>` element a chat UI
+    embeds, and `/panel/apps/<slug>` for the card behind both.
+    """
     paths = _home()
     _require_home(paths)
+    if http is not None:
+        typer.echo(f"MCP    http://{host}:{http}/mcp")
+        typer.echo(f"Panel  http://{host}:{http}/panel")
     serve_server(paths, port=http, host=host)
 
 

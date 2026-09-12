@@ -262,6 +262,9 @@ def app_detail(
     detail["snapshots"] = len(list_snapshots(conn, str(row["id"])))
     detail["installed"] = (path / "node_modules").is_dir()
     detail["repo"] = row["github_repo"]
+    # Where the work is waiting, on a machine that reviews (D15). Remembered at
+    # push time so it can be said again later without asking GitHub.
+    detail["pull_request_url"] = row["pull_request_url"]
     # Commits that are here and not known to be on GitHub. Non-zero means a push
     # was refused or the machine was offline, and the next one carries them all.
     detail["unpushed"] = len(unpushed(conn, str(row["id"])))
@@ -414,10 +417,12 @@ def screenshot(
     if running is None:
         running = start_preview(paths, conn, key)
     url = running.url.rstrip("/") + "/" + route.lstrip("/")
-    return (
-        eyes.capture(url, width=width, height=height, full_page=full_page),
-        started,
-    )
+    shot = eyes.capture(url, width=width, height=height, full_page=full_page)
+    # Kept on disk as well as returned: the model gets the image once, but the
+    # panel a human is looking at has to be able to show it again (D16).
+    paths.shots.mkdir(parents=True, exist_ok=True)
+    paths.shot(str(row["slug"])).write_bytes(shot.png)
+    return shot, started
 
 
 def stop_preview(conn: Connection, key: str) -> bool:

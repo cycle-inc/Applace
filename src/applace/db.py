@@ -120,6 +120,12 @@ MIGRATIONS: list[str] = [
         started_at  TEXT NOT NULL,
         finished_at TEXT
     )""",
+    # v7 (M10): the pull request this app's work is waiting in, on a machine
+    # that reviews (D15). It is remembered rather than asked for, because the
+    # answer arrives once, in the report of a push, and is needed every time
+    # afterwards -- by a chat window drawing a card, and by an agent that has to
+    # say where its work is a dozen messages later.
+    "ALTER TABLE apps ADD COLUMN pull_request_url TEXT",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -228,6 +234,15 @@ def set_github(
         "UPDATE apps SET github_repo = ?, github_url = ?, default_branch = ? WHERE id = ?",
         (repo, url, default_branch, app_id),
     )
+
+
+def set_pull_request(conn: sqlite3.Connection, app_id: str, url: str | None) -> None:
+    """Remember where this app's work is waiting to be merged (D15).
+
+    Called with ``None`` when the pull request is gone -- merged, or closed by
+    the person it was handed to -- so that nothing keeps pointing at it.
+    """
+    conn.execute("UPDATE apps SET pull_request_url = ? WHERE id = ?", (url, app_id))
 
 
 def mark_pushed(conn: sqlite3.Connection, app_id: str) -> None:

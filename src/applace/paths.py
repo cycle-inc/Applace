@@ -62,6 +62,15 @@ class ApplacePaths:
         """Scratch checkouts of older commits, made and removed by a deploy."""
         return self.home / "work"
 
+    @property
+    def shots(self) -> Path:
+        """The last picture taken of each app, kept for whoever asks next.
+
+        The agent gets the image in its tool result and forgets it; a chat
+        window showing an app that is not running has nothing else to show.
+        """
+        return self.home / "shots"
+
     def app(self, slug: str) -> Path:
         return self.apps / slug
 
@@ -74,10 +83,13 @@ class ApplacePaths:
     def app_logs(self, slug: str) -> Path:
         return self.logs / slug
 
+    def shot(self, slug: str) -> Path:
+        return self.shots / f"{slug}.png"
+
     def create(self) -> None:
         """Create the directory layout. Safe to call on an existing home."""
         for directory in (self.home, self.apps, self.stacks, self.env, self.logs,
-                          self.serve):
+                          self.serve, self.shots):
             directory.mkdir(parents=True, exist_ok=True)
         # The env directory holds plaintext tokens. Nothing else on the machine
         # has any business reading it, and a home created by `init` is the only
