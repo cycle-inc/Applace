@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import env, eyes, github, gitrepo, preview, shell
+from . import deploy, env, eyes, github, gitrepo, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
@@ -268,6 +268,9 @@ def app_detail(
     detail.update(outstanding(conn, str(row["id"])))
     live = preview.status(conn, str(row["id"]), str(row["slug"]), path)
     detail["preview"] = live.as_dict() if live is not None else None
+    # What is shipped, and from which commit -- the answer to "is what I am
+    # looking at what is live", which a preview URL cannot give.
+    detail["deployments"] = deploy.describe(conn, row)
     if stack is not None:
         detail["entry"] = stack.entry
         detail["env_prefix"] = stack.env_prefix
@@ -404,6 +407,60 @@ def stop_preview(conn: Connection, key: str) -> bool:
     return preview.stop(conn, str(row["id"]), str(row["slug"]), Path(str(row["path"])))
 
 
+def deploy_app(
+    paths: ApplacePaths,
+    conn: Connection,
+    key: str,
+    *,
+    target: str = deploy.LOCAL,
+    environment: str = deploy.PREVIEW,
+    commit: str | None = None,
+    confirm: bool = False,
+) -> deploy.Report:
+    """Ship a commit of the app. Production needs a human's `confirm` (D6)."""
+    row = require_app(conn, key)
+    return deploy.run(
+        paths,
+        conn,
+        row,
+        resolve(paths.stacks, str(row["stack"])),
+        target=target,
+        environment=environment,
+        commit=commit,
+        confirm=confirm,
+    )
+
+
+def rollback_app(
+    paths: ApplacePaths,
+    conn: Connection,
+    key: str,
+    *,
+    commit: str | None = None,
+    target: str | None = None,
+    environment: str | None = None,
+    confirm: bool = False,
+) -> deploy.Report:
+    """Put back an earlier commit, wherever this app was last deployed."""
+    row = require_app(conn, key)
+    return deploy.rollback(
+        paths,
+        conn,
+        row,
+        resolve(paths.stacks, str(row["stack"])),
+        commit=commit,
+        target=target,
+        environment=environment,
+        confirm=confirm,
+    )
+
+
+def stop_deployments(paths: ApplacePaths, conn: Connection, key: str) -> bool:
+    """Take down whatever this app has serving locally."""
+    row = require_app(conn, key)
+    return deploy.stop(paths, conn, row)
+
+
 def remove_app(
     paths: ApplacePaths, conn: Connection, key: str, *, delete_files: bool
 ) -> Path:
@@ -413,6 +470,7 @@ def remove_app(
     # Before the row goes: after it, nothing knows which process to signal and
     # the port stays held until someone finds it by hand.
     preview.stop(conn, str(row["id"]), str(row["slug"]), path)
+    deploy.stop(paths, conn, row)
     conn.execute("DELETE FROM apps WHERE id = ?", (str(row["id"]),))
     conn.commit()
     if delete_files and path.is_dir() and path.parent == paths.apps:

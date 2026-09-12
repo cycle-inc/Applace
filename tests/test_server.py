@@ -33,6 +33,8 @@ TOOLS = {
     "start_preview",
     "stop_preview",
     "screenshot_app",
+    "deploy_app",
+    "rollback_app",
 }
 
 

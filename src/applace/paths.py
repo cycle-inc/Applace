@@ -47,8 +47,26 @@ class ApplacePaths:
     def logs(self) -> Path:
         return self.home / "logs"
 
+    @property
+    def serve(self) -> Path:
+        """What the `local` deploy target has live: a copy of a built `dist/`.
+
+        A copy, not the app's own `dist/`, because the next build overwrites
+        that one -- and a deployment that changes when someone runs a build is
+        not a deployment.
+        """
+        return self.home / "serve"
+
+    @property
+    def work(self) -> Path:
+        """Scratch checkouts of older commits, made and removed by a deploy."""
+        return self.home / "work"
+
     def app(self, slug: str) -> Path:
         return self.apps / slug
+
+    def served(self, slug: str, environment: str) -> Path:
+        return self.serve / slug / environment
 
     def env_file(self, slug: str) -> Path:
         return self.env / f"{slug}.env"
@@ -58,7 +76,8 @@ class ApplacePaths:
 
     def create(self) -> None:
         """Create the directory layout. Safe to call on an existing home."""
-        for directory in (self.home, self.apps, self.stacks, self.env, self.logs):
+        for directory in (self.home, self.apps, self.stacks, self.env, self.logs,
+                          self.serve):
             directory.mkdir(parents=True, exist_ok=True)
         # The env directory holds plaintext tokens. Nothing else on the machine
         # has any business reading it, and a home created by `init` is the only

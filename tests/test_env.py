@@ -181,7 +181,7 @@ def test_the_preview_gets_the_values_and_the_log_does_not(
         log_path.write_text("ready\n", encoding="utf-8")
         return 4242
 
-    monkeypatch.setattr(preview_module, "_spawn", fake_spawn)
+    monkeypatch.setattr(preview_module, "spawn", fake_spawn)
     monkeypatch.setattr(preview_module, "_wait_until_ready", lambda url, pid: True)
     monkeypatch.setattr(preview_module, "_matches", lambda row, root: True)
     monkeypatch.setattr(preview_module, "responds", lambda url, timeout=1.0: True)

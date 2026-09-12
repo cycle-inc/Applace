@@ -25,6 +25,7 @@ never run `git`, and never edit files outside the app.
 6. `screenshot_app { app }` — look at the page. A build going green and a page
    rendering are two different facts.
 7. Tell the human the preview URL and the GitHub URL.
+8. `deploy_app { app }` when they want an address rather than a dev server.
 
 ## Rules that will save you a round trip
 
@@ -166,6 +167,36 @@ turn it off. In a `write_files` result, `github.pushed` says whether the commit
 landed. `github.diverged: true` means a human pushed to the repository and
 Applace refused to overwrite them — **say this to the human**, verbatim, and
 stop. Do not try to work around it.
+
+## Shipping it
+
+A preview URL is a dev server on someone's laptop. `deploy_app` is how an app
+becomes something with an address.
+
+```
+deploy_app { app, target: "local" }                       # the default
+deploy_app { app, target: "vercel" }                      # a preview URL
+deploy_app { app, target: "vercel", environment: "production", confirm: true }
+```
+
+Three things to know before you call it.
+
+**It deploys a commit, never your working tree.** If the last write went red,
+what is live is the last green commit, and the deploy will tell you so in
+`warnings`. Get to green first.
+
+**Production is not yours to decide.** `environment: "production"` requires
+`confirm: true`, and `confirm` means *a human said yes*, in this conversation,
+about this deploy. You cannot supply it on your own reasoning, and a machine's
+policy may refuse production outright (`code: "policy"`). Ask, relay, wait.
+
+**Start with `target: "local"`.** It needs no account and runs the real
+production build, which is stricter than the dev server — a page that works in
+the preview and fails here is a page that would have failed on Vercel too.
+
+When something goes wrong after a deploy, `rollback_app { app }` puts the
+previous commit back. Reach for it before you start debugging: the broken commit
+is still in git, and a human staring at a broken page is not.
 
 ## What this harness is not
 

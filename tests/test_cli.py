@@ -401,3 +401,120 @@ def test_check_exits_nonzero_and_prints_the_errors_when_red(home: Home) -> None:
     assert "red at typecheck" in result.output
     assert "src/a.ts:2:3" in result.output
     assert "TS1005" in result.output
+
+
+# -- deployment ------------------------------------------------------------
+
+
+def _shippable(paths: ApplacePaths) -> None:
+    """Make the fake stack build something real and say where it can go."""
+    import yaml
+
+    manifest = paths.stacks / "fake" / "stack.yaml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["commands"]["build"] = (
+        "sh -c 'mkdir -p out && printf \"<html>shipped</html>\" > out/index.html'"
+    )
+    data["deploy"] = ["local", "vercel"]
+    manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+def test_deploy_local_prints_a_url_and_stop_takes_it_down(home: Home) -> None:
+    paths, _ = home
+    _shippable(paths)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+
+    result = runner.invoke(app, ["deploy", "ship-it"])
+    assert result.exit_code == 0, result.output
+    assert "http://127.0.0.1:52" in result.output
+
+    listed = runner.invoke(app, ["deployments", "ship-it"])
+    assert "live" in listed.output and "local" in listed.output
+
+    stopped = runner.invoke(app, ["stop", "ship-it"])
+    assert "local deployment" in stopped.output
+
+
+def test_deploying_to_production_asks_a_human_first(home: Home) -> None:
+    """D6 again, at the other moment of exposure."""
+    paths, _ = home
+    _shippable(paths)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+
+    refused = runner.invoke(app, ["deploy", "ship-it", "--production"], input="n\n")
+    assert refused.exit_code != 0
+    assert "PRODUCTION" in refused.output
+    assert runner.invoke(app, ["deployments", "ship-it"]).output.count("live") == 0
+
+    accepted = runner.invoke(app, ["deploy", "ship-it", "--production", "--yes"])
+    assert accepted.exit_code == 0, accepted.output
+    assert "(production)" in accepted.output
+    runner.invoke(app, ["stop", "ship-it"])
+
+
+def test_a_failed_deploy_exits_nonzero_with_the_build_log(home: Home) -> None:
+    import yaml
+
+    paths, _ = home
+    _shippable(paths)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+    manifest = paths.stacks / "fake" / "stack.yaml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["commands"]["build"] = "sh -c 'echo the bundler gave up >&2; exit 1'"
+    manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    result = runner.invoke(app, ["deploy", "ship-it"])
+    assert result.exit_code == 1
+    assert "FAILED" in result.output
+    assert "the bundler gave up" in result.output
+
+    logged = runner.invoke(app, ["logs", "ship-it", "--of", "deploy"])
+    assert "the bundler gave up" in logged.output
+
+
+def test_rollback_from_the_terminal_puts_the_previous_commit_back(home: Home) -> None:
+    paths, _ = home
+    _shippable(paths)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+    first = runner.invoke(app, ["deploy", "ship-it"])
+    (paths.app("ship-it") / "src" / "main.txt").write_text("second\n", encoding="utf-8")
+    runner.invoke(app, ["check", "ship-it", "-m", "Second"])
+    runner.invoke(app, ["deploy", "ship-it"])
+
+    result = runner.invoke(app, ["rollback", "ship-it"])
+    assert result.exit_code == 0, result.output
+    assert "FAILED" not in result.output
+    # "ship-it → local (preview) from <sha>": back to the sha that was live
+    # before the second deploy.
+    assert result.output.split()[5] == first.output.split()[5]
+    runner.invoke(app, ["stop", "ship-it"])
+
+
+def test_deployments_on_an_app_that_never_shipped_says_what_to_run(home: Home) -> None:
+    paths, _ = home
+    _shippable(paths)
+    runner.invoke(app, ["new", "Ship It", "--stack", "fake", "--no-install"])
+
+    result = runner.invoke(app, ["deployments", "ship-it"])
+    assert "applace deploy ship-it" in result.output
+
+
+def test_vercel_status_with_nothing_connected_is_an_instruction(home: Home) -> None:
+    result = runner.invoke(app, ["vercel", "status"])
+    assert result.exit_code == 1
+    assert "applace vercel connect" in result.output
+
+
+def test_vercel_connect_then_status(home: Home, fake_vercel: object) -> None:
+    from conftest import FakeVercel
+
+    assert isinstance(fake_vercel, FakeVercel)
+    connect = runner.invoke(
+        app, ["vercel", "connect", "--api-base", fake_vercel.api_base, "--team", "t_1"]
+    )
+    assert connect.exit_code == 0, connect.output
+    assert "authenticated as acme-ci" in connect.output
+
+    status = runner.invoke(app, ["vercel", "status"])
+    assert status.exit_code == 0
+    assert "team t_1" in status.output

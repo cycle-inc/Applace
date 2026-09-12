@@ -31,7 +31,8 @@ def test_the_document_names_the_tools_it_tells_an_agent_to_call(home: Home) -> N
     text = skill.text()
     tools = {tool.name for tool in asyncio.run(build_server(paths).list_tools())}
     for name in ("get_skill", "list_stacks", "create_app", "read_files",
-                 "write_files", "screenshot_app", "set_env"):
+                 "write_files", "screenshot_app", "set_env", "deploy_app",
+                 "rollback_app"):
         assert name in tools, f"{name} is in SKILL.md but not a tool"
         assert name in text, f"{name} is a tool but not in SKILL.md"
 
@@ -74,3 +75,23 @@ def test_a_tightened_policy_is_part_of_what_the_agent_is_told(home: Home) -> Non
     described = skill.describe(paths)
     assert "only react may be added" in described["policy"]["summary"]
     assert described["policy"]["exposure"]["public_repositories"] == "confirm"
+
+
+def test_the_document_teaches_the_deploy_rule_that_an_agent_cannot_guess(
+    home: Home, fake_vercel: object
+) -> None:
+    """D6 has to be in the document, not only in the refusal it produces."""
+    from conftest import FakeVercel, on_vercel
+
+    paths, _ = home
+    text = skill.text()
+    assert "deploy_app" in text and "rollback_app" in text
+    assert "a human said yes" in text
+
+    described = skill.describe(paths)
+    assert described["deploy"]["targets"] == ["local"]
+    assert described["deploy"]["production"] == "confirm"
+
+    assert isinstance(fake_vercel, FakeVercel)
+    on_vercel(paths, fake_vercel)
+    assert skill.describe(paths)["deploy"]["targets"] == ["local", "vercel"]

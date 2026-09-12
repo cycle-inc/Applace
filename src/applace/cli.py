@@ -14,6 +14,7 @@ from typing import Annotated
 
 import typer
 
+from . import deploy as deployment
 from . import env as env_store
 from . import gate, policy, skill
 from .apps import (
@@ -21,13 +22,19 @@ from .apps import (
     app_detail,
     create_app,
     declare_env,
+    deploy_app,
     remove_app,
     require_app,
+    rollback_app,
     screenshot,
     start_preview,
+    stop_deployments,
     stop_preview,
 )
-from .db import connect, list_apps
+from .db import connect, latest_deployment, list_apps
+from .deploy import DeployError
+from .deploy import Report as DeployReport
+from .deploy import describe as describe_deployments
 from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable, Shot
 from .gate import GateReport
 from .github import DEFAULT_HOST, DEFAULT_VISIBILITY, VISIBILITIES, GitHubError, GitHubLink
@@ -39,9 +46,15 @@ from .init_cmd import InitReport, run_init
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
+from .preview import tail as preview_tail
 from .server import serve as serve_server
 from .stacks import StackError, registry
 from .sync import adopt_app, push_app
+from .vercel import VercelError, VercelLink
+from .vercel import api as vercel_api
+from .vercel import load as vercel_load
+from .vercel import save as vercel_save
+from .vercel import token as vercel_token
 
 app = typer.Typer(
     add_completion=False,
@@ -190,6 +203,16 @@ def list_command() -> None:
             commit = (detail.get("commit") or "")[:12] or "-"
             live = detail.get("preview")
             where = f"  {live['url']}" if live else ""
+            shipped = next(
+                (
+                    entry
+                    for entry in detail.get("deployments", [])
+                    if entry["status"] == "live"
+                ),
+                None,
+            )
+            if shipped:
+                where += f"  [{shipped['environment']}] {shipped['url']}"
             typer.echo(
                 f"{str(row['slug']):<24} {str(row['stack']):<16} {state:<8} {commit}{where}"
             )
@@ -227,18 +250,27 @@ def dev(
 def stop(
     name: Annotated[str, typer.Argument(help="The app's slug.")],
 ) -> None:
-    """Stop the app's dev server."""
+    """Stop the app's dev server, and anything it is serving locally."""
     paths = _home()
     _require_home(paths)
     conn = connect(paths.db)
     try:
         stopped = stop_preview(conn, name)
+        # `applace stop` means "stop this app on my machine". Leaving a local
+        # deployment up because it came from a different command would be a
+        # surprise, and a held port.
+        served = stop_deployments(paths, conn, name)
     except AppError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
     finally:
         conn.close()
-    typer.echo(f"Stopped {name}" if stopped else f"{name} was not running")
+    if stopped:
+        typer.echo(f"Stopped the preview of {name}")
+    if served:
+        typer.echo(f"Stopped the local deployment of {name}")
+    if not stopped and not served:
+        typer.echo(f"{name} was not running")
 
 
 @app.command()
@@ -356,6 +388,138 @@ def format_gate(report: GateReport) -> str:
     return "\n".join(lines)
 
 
+@app.command()
+def deploy(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    target: Annotated[
+        str, typer.Option("--target", "-t", help="local or vercel.")
+    ] = deployment.LOCAL,
+    production: Annotated[
+        bool,
+        typer.Option("--production", help="Ship it for real, not to a preview URL."),
+    ] = False,
+    commit: Annotated[
+        str | None, typer.Option("--commit", help="Deploy this commit instead of HEAD.")
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
+) -> None:
+    """Build a commit of the app and put it somewhere it can be opened.
+
+    `--target local` needs no account: it runs the same production build and
+    serves the result from this machine. Production is the gated act (D6) and
+    this command asks before doing it.
+    """
+    paths = _home()
+    _require_home(paths)
+    environment = deployment.PRODUCTION if production else deployment.PREVIEW
+    if production and not yes:
+        # The confirmation the agent cannot give. Asked here, before anything is
+        # built, so a "no" costs nobody a minute of npm.
+        typer.confirm(
+            f"Deploy {name} to PRODUCTION on {target}? This is what real users "
+            f"will see.",
+            abort=True,
+            default=False,
+        )
+    conn = connect(paths.db)
+    try:
+        report = deploy_app(
+            paths, conn, name,
+            target=target, environment=environment, commit=commit,
+            confirm=production,
+        )
+    except (AppError, StackError, DeployError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_deployment(report))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def rollback(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    commit: Annotated[
+        str | None,
+        typer.Argument(help="The commit to put back. The previous one by default."),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
+) -> None:
+    """Put an earlier commit back where this app is deployed."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        live = latest_deployment(conn, str(row["id"]), status="live")
+        production = live is not None and str(live["environment"]) == "production"
+        if production and not yes:
+            typer.confirm(
+                f"Roll PRODUCTION back to {commit or 'the previous commit'}?",
+                abort=True,
+                default=False,
+            )
+        report = rollback_app(paths, conn, name, commit=commit, confirm=production)
+    except (AppError, StackError, DeployError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(format_deployment(report))
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+def format_deployment(report: DeployReport) -> str:
+    lines = [
+        f"{report.app} → {report.target} ({report.environment}) "
+        f"from {report.commit[:12]}"
+    ]
+    if report.ok:
+        lines.append(f"  {report.url}")
+    else:
+        lines.append(f"  FAILED  {report.message}")
+        log = report.detail.get("log")
+        if isinstance(log, list):
+            log = "\n".join(str(line) for line in log)
+        if log:
+            lines += [f"  | {line}" for line in str(log).splitlines()[-20:]]
+    if report.env_names:
+        lines.append(f"  env     {', '.join(report.env_names)}")
+    lines += [f"  note    {warning}" for warning in report.warnings]
+    return "\n".join(lines)
+
+
+@app.command("deployments")
+def deployments_command(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
+) -> None:
+    """What has been deployed for this app, and what is live now."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        rows = describe_deployments(conn, row, limit=limit)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if not rows:
+        typer.echo(f"{name} has never been deployed. `applace deploy {name}` ships it.")
+        return
+    for entry in rows:
+        where = f"  {entry['url']}" if entry["url"] else ""
+        typer.echo(
+            f"{entry['at']:<22} {entry['target']:<8} {entry['environment']:<11} "
+            f"{entry['status']:<8} {entry['commit'][:12]}{where}"
+        )
+
+
 @app.command("skill")
 def skill_command(
     full: Annotated[
@@ -385,6 +549,11 @@ def skill_command(
     )
     rules = described["policy"]
     typer.echo(f"policy   {rules.get('error') or rules['summary']}")
+    shipping = described["deploy"]
+    typer.echo(
+        f"deploy   {', '.join(shipping['targets'])} "
+        f"(production: {shipping['production']}, and always a human)"
+    )
 
 
 @app.command("policy")
@@ -645,6 +814,69 @@ def github_adopt(
     typer.echo(f"  `applace push {name}` sends its history there")
 
 
+vercel_app = typer.Typer(
+    add_completion=False,
+    help="The Vercel account deployments go to (D12).",
+    no_args_is_help=True,
+)
+app.add_typer(vercel_app, name="vercel")
+
+
+@vercel_app.command("connect")
+def vercel_connect(
+    team: Annotated[
+        str | None,
+        typer.Option("--team", help="Team id, if the projects belong to a team."),
+    ] = None,
+    api_base: Annotated[
+        str | None,
+        typer.Option("--api-base", help="Override the API root. For testing."),
+    ] = None,
+) -> None:
+    """Say which Vercel account ships this machine's apps.
+
+    The token is not stored: it is read from VERCEL_TOKEN (or
+    APPLACE_VERCEL_TOKEN) each time, so `config.json` stays a file anyone can
+    read and a leaked home directory leaks nothing.
+    """
+    paths = _home()
+    _require_home(paths)
+    link = VercelLink(team=team, api_base=api_base)
+    vercel_save(paths, link)
+    typer.echo(f"Vercel connected{f' (team {team})' if team else ''}")
+    typer.echo(f"  api     {link.api}")
+    typer.echo(f"  {_vercel_reachability(link)}")
+
+
+@vercel_app.command("status")
+def vercel_status() -> None:
+    """Whether this machine could deploy to Vercel right now."""
+    paths = _home()
+    _require_home(paths)
+    link = vercel_load(paths)
+    if link is None:
+        typer.echo(
+            "Vercel is not connected. `applace vercel connect` is one command, "
+            "and `applace deploy <app>` works without it."
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"Vercel{f' (team {link.team})' if link.team else ''}")
+    typer.echo(f"  api     {link.api}")
+    typer.echo(f"  {_vercel_reachability(link)}")
+
+
+def _vercel_reachability(link: VercelLink) -> str:
+    try:
+        auth = vercel_token()
+    except VercelError as exc:
+        return str(exc)
+    status, body = vercel_api(link, "GET", "/v2/user", auth=auth)
+    if status == 200:
+        user = body.get("user") or body
+        return f"token ok, authenticated as {user.get('username') or user.get('email')}"
+    return f"Vercel answered {status}: {body.get('error', {}).get('message', 'no detail')}"
+
+
 @app.command()
 def push(
     name: Annotated[str, typer.Argument(help="The app's slug.")],
@@ -666,6 +898,32 @@ def push(
         return
     typer.secho(report.reason, fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
+
+
+@app.command()
+def logs(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    which: Annotated[
+        str, typer.Option("--of", help="dev or deploy.")
+    ] = "dev",
+    lines: Annotated[int, typer.Option("--lines", "-n")] = 40,
+) -> None:
+    """The end of the dev server's log, or of the last deploy's."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    log = paths.app_logs(str(row["slug"])) / ("deploy.log" if which == "deploy" else "dev.log")
+    if not log.is_file():
+        typer.echo(f"No {which} log for {name} yet ({log}).")
+        raise typer.Exit(code=1)
+    typer.echo(preview_tail(log, lines))
 
 
 @app.command()

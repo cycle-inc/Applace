@@ -101,6 +101,25 @@ MIGRATIONS: list[str] = [
         created_at  TEXT NOT NULL,
         PRIMARY KEY (app_id, name)
     )""",
+    # v6 (M7): one row per deploy, started before the adapter runs and finished
+    # after it, whichever way it went. `confirmed` records that a human said yes
+    # to production (D6) -- the journal is where that answer survives, because
+    # the question was asked once and the deployment outlives the conversation.
+    # `detail_json` carries what the adapter needs to find its own work again: a
+    # pid and a port for a local server, an id for a Vercel build.
+    """CREATE TABLE IF NOT EXISTS deployments (
+        id          TEXT PRIMARY KEY,
+        app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        commit_sha  TEXT NOT NULL,
+        target      TEXT NOT NULL,          -- local | vercel
+        environment TEXT NOT NULL,          -- preview | production
+        status      TEXT NOT NULL,          -- running | live | failed | stopped
+        url         TEXT,
+        detail_json TEXT,
+        confirmed   INTEGER NOT NULL DEFAULT 0,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT
+    )""",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -397,6 +416,114 @@ def list_env(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
 
 def delete_env(conn: sqlite3.Connection, app_id: str, name: str) -> None:
     conn.execute("DELETE FROM env_vars WHERE app_id = ? AND name = ?", (app_id, name))
+
+
+# -- deployments (M7) -------------------------------------------------------
+
+
+def insert_deployment(
+    conn: sqlite3.Connection,
+    *,
+    deployment_id: str,
+    app_id: str,
+    commit_sha: str,
+    target: str,
+    environment: str,
+    confirmed: bool,
+) -> None:
+    """Open a deployment row before the adapter is called.
+
+    Before, not after: an adapter that hangs or crashes has still changed the
+    world, and a row that says `running` with nothing under it is the truth --
+    a row that only appears on success would hide exactly the deploys someone
+    needs to go and look at.
+    """
+    conn.execute(
+        """
+        INSERT INTO deployments(id, app_id, commit_sha, target, environment,
+                                status, confirmed, started_at)
+        VALUES(?, ?, ?, ?, ?, 'running', ?, ?)
+        """,
+        (deployment_id, app_id, commit_sha, target, environment,
+         int(confirmed), now_iso()),
+    )
+
+
+def finish_deployment(
+    conn: sqlite3.Connection,
+    deployment_id: str,
+    *,
+    status: str,
+    url: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE deployments
+           SET status = ?, url = ?, detail_json = ?, finished_at = ?
+         WHERE id = ?
+        """,
+        (status, url, canonical_json(detail or {}), now_iso(), deployment_id),
+    )
+
+
+def find_deployment(conn: sqlite3.Connection, deployment_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM deployments WHERE id = ?", (deployment_id,)
+    ).fetchone()
+
+
+def latest_deployment(
+    conn: sqlite3.Connection,
+    app_id: str,
+    *,
+    target: str | None = None,
+    environment: str | None = None,
+    status: str | None = None,
+) -> sqlite3.Row | None:
+    """The most recent deployment matching whatever is asked, or None."""
+    query = "SELECT * FROM deployments WHERE app_id = ?"
+    parameters: list[Any] = [app_id]
+    for column, value in (("target", target), ("environment", environment),
+                          ("status", status)):
+        if value is not None:
+            query += f" AND {column} = ?"
+            parameters.append(value)
+    query += " ORDER BY rowid DESC LIMIT 1"
+    return conn.execute(query, parameters).fetchone()
+
+
+def list_deployments(
+    conn: sqlite3.Connection, app_id: str, *, limit: int = 20
+) -> list[sqlite3.Row]:
+    """An app's deployments, most recent first."""
+    return list(
+        conn.execute(
+            "SELECT * FROM deployments WHERE app_id = ? ORDER BY rowid DESC LIMIT ?",
+            (app_id, limit),
+        )
+    )
+
+
+def live_deployments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every deployment still claiming a process, with the app it belongs to."""
+    return list(
+        conn.execute(
+            "SELECT deployments.*, apps.slug, apps.path FROM deployments "
+            "JOIN apps ON apps.id = deployments.app_id "
+            "WHERE deployments.status IN ('running', 'live') ORDER BY apps.slug"
+        )
+    )
+
+
+def find_snapshot(
+    conn: sqlite3.Connection, app_id: str, commit_sha: str
+) -> sqlite3.Row | None:
+    """The snapshot for a commit, or None if Applace never made that commit."""
+    return conn.execute(
+        "SELECT * FROM snapshots WHERE app_id = ? AND commit_sha = ?",
+        (app_id, commit_sha),
+    ).fetchone()
 
 
 def list_snapshots(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:

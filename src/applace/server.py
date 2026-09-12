@@ -17,11 +17,14 @@ from mcp.server.mcpserver import Image, MCPServer
 from . import gate, skill
 from .apps import AppError, app_detail, app_summary, create_app, require_app
 from .apps import declare_env as declare_env_for
+from .apps import deploy_app as deploy_app_for
+from .apps import rollback_app as rollback_app_for
 from .apps import screenshot as screenshot_for
 from .apps import start_preview as start_preview_for
 from .apps import stop_preview as stop_preview_for
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
+from .deploy import LOCAL, PREVIEW, DeployError, DeployRefused
 from .env import EnvError
 from .eyes import DEFAULT_HEIGHT, DEFAULT_WIDTH, EyesUnavailable
 from .gitrepo import GitError
@@ -45,6 +48,10 @@ is not. start_preview gives a human a URL to watch while you work, and
 screenshot_app tells you what the page actually did. Nothing you create is
 thrown away -- every green change is a commit, and when the machine has a GitHub
 organisation connected, every commit is pushed to the app's own repository.
+
+deploy_app ships a commit -- to this machine, or to Vercel through the app's own
+repository. A production deploy needs a human to confirm it; that is a rule, not
+a setting, and rollback_app puts the previous commit back when one goes wrong.
 
 Call get_skill first. It is short, it says how to use the rest of these tools,
 and it says what this particular machine is set up to do.
@@ -342,6 +349,82 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
                 return {"ok": False, "code": "unknown-app", "error": str(exc)}
             except EnvError as exc:
                 return {"ok": False, "code": "invalid-name", "error": str(exc)}
+
+    # Sync: a deploy builds, and a provider build is minutes.
+    @server.tool()
+    def deploy_app(
+        app: str,
+        target: str = LOCAL,
+        environment: str = PREVIEW,
+        commit: str | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Build the app's current commit and put it somewhere a human can open.
+
+        `target` is "local" (served from this machine, needs no account) or
+        "vercel". `environment` is "preview" or "production". Start with a local
+        preview deploy: it runs the real production build, so it catches what
+        the dev server hides.
+
+        A **production** deploy is not yours to make. It needs `confirm` true,
+        and `confirm` means a human said yes out loud -- you cannot decide that
+        for them. Ask, and relay what they answer. If the machine's policy
+        forbids production deploys, `code` is policy and that is final.
+
+        What goes live is a commit, never your uncommitted work. `commit` names
+        an older one if you are putting something back. When it returns, `url`
+        is the address and `status` is live or failed; a failed deploy leaves
+        `detail.log`, which is the build's own output.
+
+        On failure `code` is unknown-app, unknown-stack, confirm-required,
+        policy, unsupported-target, not-pushed, or deploy-failed.
+        """
+        with session() as conn:
+            try:
+                report = deploy_app_for(
+                    home, conn, app,
+                    target=target, environment=environment,
+                    commit=commit, confirm=confirm,
+                )
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except StackError as exc:
+                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
+            except DeployRefused as exc:
+                return exc.as_dict()
+            except DeployError as exc:
+                return {"ok": False, "code": "deploy-failed", "error": str(exc)}
+            return report.as_dict()
+
+    @server.tool()
+    def rollback_app(
+        app: str, commit: str | None = None, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Put back a commit that worked, to wherever the app is deployed.
+
+        With no `commit`, this is the one that was live before the current one.
+        Use it the moment a human says the deployed app is broken: it is faster
+        and safer than fixing forward, and the broken commit is still in git for
+        you to work on afterwards.
+
+        Rolling back production is still a production deploy, so it still needs
+        `confirm` from a human.
+
+        On failure `code` is unknown-app, never-deployed, no-earlier-deployment,
+        unknown-commit, confirm-required, policy or deploy-failed.
+        """
+        with session() as conn:
+            try:
+                report = rollback_app_for(home, conn, app, commit=commit, confirm=confirm)
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except StackError as exc:
+                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
+            except DeployRefused as exc:
+                return exc.as_dict()
+            except DeployError as exc:
+                return {"ok": False, "code": "deploy-failed", "error": str(exc)}
+            return report.as_dict()
 
     return server
 

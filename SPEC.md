@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M6 are shipped.** M7 is next and is not yet built.
+> **Status: M1 to M7 are shipped.** M8 is next and is not yet built.
 
 ## What v1 is
 
@@ -140,8 +140,11 @@ applace shot <app> [--route R]    # what the browser sees, and what it said (D5)
 applace open <app>                # the app in $EDITOR, the repo in a browser
 applace env set <app> <NAME>      # prompts for the value, never echoes it (D8)
 applace github connect --org O    # the D2b answer
-applace deploy <app> [--prod]
-applace logs <app>
+applace vercel connect [--team T] # the D12 answer
+applace deploy <app> [-t TARGET] [--production] [--commit SHA]
+applace rollback <app> [SHA]      # the previous commit by default
+applace deployments <app>
+applace logs <app> [--of dev|deploy]
 ```
 
 ## SQLite schema (v1)
@@ -154,8 +157,13 @@ gates(id, app_id, snapshot_id, stage, ok, duration_ms,      -- one per write_fil
       errors_json, new_deps_json, created_at)
 previews(id, app_id, port, pid, url, status, started_at, stopped_at)
 deployments(id, app_id, commit_sha, target, environment, status,
-            url, detail, confirmed, started_at, finished_at)
+            url, detail_json, confirmed, started_at, finished_at)
+env_vars(app_id, name, description, created_at)             -- names only (D8)
 ```
+
+The tables arrive by append-only migration, never by editing the statement above:
+`gates` in v2, `previews` in v3, `snapshots.pushed_at` in v4, `env_vars` in v5 and
+`deployments` in v6.
 
 `gates` and `deployments` are simultaneously the audit log, the debug trace and the
 answer to "why is this app in the state it is in". Never skip journaling to save
@@ -304,9 +312,37 @@ postinstall script gets a turn.
 
 ### v2 — host it and industrialise it
 
-**M7 — Deployment.** The adapter interface, the `local` target (build + serve the
-`dist`), the **Vercel** target through GitHub (D12), preview versus production, the
-D6 confirm gate, `rollback_app`, and environment synchronisation.
+**M7 — Deployment.** *Shipped.* The adapter interface, the `local` target (build +
+serve the `dist`), the **Vercel** target through GitHub (D12), preview versus
+production, the D6 confirm gate, `rollback_app`, environment synchronisation, and
+the CLI verbs `deploy`, `rollback`, `deployments`, `logs --of deploy` and
+`vercel connect|status`.
+*Acceptance:* `scripts/m7_acceptance.sh` — an app built by the real stack is served
+on a URL that answers with its production bundle; a half-written file on disk does
+not reach it; production is refused for an agent, asked of a human in the terminal,
+and refused outright under a `deny` policy; a rollback puts the previous commit
+back while the app's own tree stays on the regression; and the value the human
+typed is in the bundle a browser downloads and in nothing the agent, the journal,
+git or the deploy log holds.
+
+What M7 learned. **"A deployment is a commit" is a claim about *where the build
+runs*.** The first implementation built in the app directory whenever the target
+sha was `HEAD` — which quietly shipped whatever the agent had half-written, and
+would only have shown up later as a production page nobody could explain from the
+sha. A dirty tree now builds the commit in a `git worktree`, with `node_modules`
+lent by symlink when the two manifests are byte-identical, and the deploy says in
+`warnings` that the uncommitted work was left behind. **Rollback is not a git
+operation, it is a deploy of an older sha**: checking the past out under the agent's
+feet would eat the work someone is in the middle of fixing, so the app's tree never
+moves and the broken commit stays `HEAD`. **The gate has to sit below every entry
+point, not at each one**: `deploy.gate` is the only place that decides, the policy
+can refuse production but can never supply the confirmation, and both the CLI's
+`typer.confirm` and the MCP tool's `confirm-required` refusal are ways of reaching
+that one rule. **The journal opens before the adapter runs** and is closed on every
+path including a crash, because an adapter that hangs has still changed the world.
+And **a timing constant bound in a signature default cannot be tuned by a test**:
+`wait(interval=POLL_INTERVAL)` read the module value at import, so the Vercel suite
+politely slept 47 seconds per run until both timings were resolved in the body.
 
 **M8 — Company stacks.** `applace stacks add <git-url>`, a stack carrying a design
 system and an internal API client, commit pinning, and what happens to apps when

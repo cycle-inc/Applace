@@ -82,7 +82,7 @@ def test_stopping_frees_the_port_and_kills_the_whole_group(app: Any) -> None:
     running = start_preview(paths, conn, "preview-app")
     assert stop_preview(conn, "preview-app") is True
     assert not _alive(running.pid)
-    assert preview._is_free(running.port)
+    assert preview.port_is_free(running.port)
     assert not preview.responds(running.url)
 
 

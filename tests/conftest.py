@@ -12,10 +12,13 @@ from typing import Any, Iterator
 import pytest
 from mcp.types import CallToolResult, TextContent
 
+from applace import vercel
 from applace.db import Connection, connect
 from applace.github import GitHubLink
 from applace.github import save as save_link
 from applace.paths import ApplacePaths
+from applace.vercel import VercelLink
+from applace.vercel import save as save_vercel
 
 # A stack that needs nothing but `true` on PATH. Almost every test wants to know
 # what Applace does with a stack, not what npm does with a package.json, and
@@ -219,6 +222,184 @@ def connected(paths: ApplacePaths, fake: FakeGitHub, **overrides: Any) -> GitHub
     """Connect the home to the fake GitHub, as `applace github connect` does."""
     link = GitHubLink(org="acme", api_base=fake.api_base, **overrides)
     save_link(paths, link)
+    return link
+
+
+class FakeVercel:
+    """A Vercel that answers on localhost and remembers what it was asked.
+
+    It keeps the shape of the real API -- projects by name, deployments that are
+    not ready the instant they are created, env values it never gives back -- so
+    a test can assert the two things that matter: that a deployment names a
+    commit of the app's repository (D12), and that a value reached the provider
+    without reaching anything an agent reads (D8).
+    """
+
+    def __init__(self) -> None:
+        self.projects: dict[str, dict[str, Any]] = {}
+        self.deployments: dict[str, dict[str, Any]] = {}
+        self.env: list[dict[str, Any]] = []
+        self.uploads: list[str] = []
+        self.requests: list[tuple[str, str]] = []
+        self.tokens: list[str] = []
+        # What every build ends as, and how many polls it takes to get there.
+        self.ready_state = "READY"
+        self.polls_before_ready = 1
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def api_base(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    @property
+    def last_deployment(self) -> dict[str, Any]:
+        return list(self.deployments.values())[-1]
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+            @property
+            def route(self) -> str:
+                return self.path.split("?", 1)[0]
+
+            def _body(self) -> Any:
+                length = int(self.headers.get("Content-Length") or 0)
+                return json.loads(self.rfile.read(length) or b"{}") if length else {}
+
+            def _raw(self) -> bytes:
+                length = int(self.headers.get("Content-Length") or 0)
+                return self.rfile.read(length)
+
+            def _reply(self, status: int, payload: Any) -> None:
+                raw = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def _authorised(self) -> bool:
+                header = self.headers.get("Authorization", "")
+                if not header.startswith("Bearer "):
+                    return False
+                fake.tokens.append(header.removeprefix("Bearer "))
+                return True
+
+            def do_GET(self) -> None:
+                fake.requests.append(("GET", self.path))
+                if not self._authorised():
+                    return self._reply(403, {"error": {"message": "Not authorized"}})
+                if self.route == "/v2/user":
+                    return self._reply(200, {"user": {"username": "acme-ci"}})
+                if self.route.startswith("/v9/projects/"):
+                    name = self.route.removeprefix("/v9/projects/")
+                    record = fake.projects.get(name)
+                    if record is None:
+                        return self._reply(404, {"error": {"message": "Not found"}})
+                    return self._reply(200, record)
+                if self.route.startswith("/v13/deployments/"):
+                    record = fake.deployments.get(self.route.split("/")[-1])
+                    if record is None:
+                        return self._reply(404, {"error": {"message": "Not found"}})
+                    record["polls"] += 1
+                    if record["polls"] >= fake.polls_before_ready:
+                        record["readyState"] = fake.ready_state
+                        if fake.ready_state == "ERROR":
+                            record["errorMessage"] = "the build failed on Vercel"
+                    return self._reply(200, record)
+                if "/events" in self.route:
+                    return self._reply(
+                        200, {"data": [{"text": "npm run build"}, {"text": "error"}]}
+                    )
+                self._reply(404, {"error": {"message": "Not found"}})
+
+            def do_POST(self) -> None:
+                fake.requests.append(("POST", self.path))
+                if not self._authorised():
+                    return self._reply(403, {"error": {"message": "Not authorized"}})
+                if self.route == "/v11/projects":
+                    return self._reply(200, fake._create_project(self._body()))
+                if self.route.endswith("/env"):
+                    payload = self._body()
+                    fake.env.extend(payload if isinstance(payload, list) else [payload])
+                    return self._reply(200, {"created": payload})
+                if self.route == "/v2/files":
+                    fake.uploads.append(self.headers.get("x-vercel-digest", ""))
+                    self._raw()
+                    return self._reply(200, {})
+                if self.route == "/v13/deployments":
+                    return self._reply(200, fake._create_deployment(self._body()))
+                self._reply(404, {"error": {"message": "Not found"}})
+
+        return Handler
+
+    def _create_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload["name"])
+        record: dict[str, Any] = {
+            "id": f"prj_{name}",
+            "name": name,
+            "buildCommand": payload.get("buildCommand"),
+            "outputDirectory": payload.get("outputDirectory"),
+        }
+        repository = payload.get("gitRepository")
+        if repository:
+            org, _, repo = str(repository["repo"]).partition("/")
+            record["link"] = {
+                "type": "github",
+                "org": org,
+                "repo": repo,
+                "repoId": f"repo-{repo}",
+            }
+        self.projects[name] = record
+        return record
+
+    def _create_deployment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        identifier = f"dpl_{len(self.deployments) + 1}"
+        record = {
+            "id": identifier,
+            "name": payload.get("name"),
+            "readyState": "BUILDING",
+            "url": f"{payload.get('name')}-{identifier}.vercel.app",
+            "target": payload.get("target"),
+            "alias": [f"{payload.get('name')}.vercel.app"],
+            "inspectorUrl": f"https://vercel.test/{identifier}",
+            "gitSource": payload.get("gitSource"),
+            "files": payload.get("files", []),
+            "polls": 0,
+        }
+        self.deployments[identifier] = record
+        return record
+
+
+@pytest.fixture
+def fake_vercel(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeVercel]:
+    """A Vercel on localhost, with a token in the environment to reach it."""
+    monkeypatch.setenv("APPLACE_VERCEL_TOKEN", "vercel-t0ken")
+    # The real interval is three seconds, which is right for a real build and
+    # absurd for a test that finishes in milliseconds.
+    monkeypatch.setattr(vercel, "POLL_INTERVAL", 0.01)
+    fake = FakeVercel()
+    try:
+        yield fake
+    finally:
+        fake.close()
+
+
+def on_vercel(paths: ApplacePaths, fake: FakeVercel, **overrides: Any) -> VercelLink:
+    """Connect the home to the fake Vercel, as `applace vercel connect` does."""
+    link = VercelLink(api_base=fake.api_base, **overrides)
+    save_vercel(paths, link)
     return link
 
 

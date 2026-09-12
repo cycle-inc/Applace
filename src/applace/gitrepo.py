@@ -8,6 +8,7 @@ honest wrapper -- if a call fails, the caller gets git's own message.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,21 @@ def commit_all(path: Path, message: str) -> Commit:
 def head(path: Path) -> Commit:
     sha = git("rev-parse", "HEAD", cwd=path).strip()
     message = git("log", "-1", "--pretty=%s", cwd=path).strip()
+    return Commit(sha=sha, message=message)
+
+
+def resolve(path: Path, ref: str) -> Commit | None:
+    """The commit a ref names, or None when this repository has no such thing.
+
+    Anything git accepts works -- a sha, a short sha, `HEAD~2`, a tag -- which is
+    what makes `applace rollback <app> <sha>` forgiving about how the sha was
+    copied out of `applace log`.
+    """
+    try:
+        sha = git("rev-parse", "--verify", f"{ref}^{{commit}}", cwd=path).strip()
+    except GitError:
+        return None
+    message = git("log", "-1", "--pretty=%s", sha, cwd=path).strip()
     return Commit(sha=sha, message=message)
 
 
@@ -234,6 +250,30 @@ def push(
         cwd=path,
         env=_authenticated(token),
     )
+
+
+def add_worktree(path: Path, sha: str, destination: Path) -> None:
+    """Check a commit out somewhere else, without touching the app's own tree.
+
+    Deploying an *older* commit has to build that commit's files, and the one
+    thing it must not do is move the app's working tree to get them: the agent
+    may be mid-edit, and a rollback that silently checks out the past under
+    someone's feet is how a harness eats work.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    git("worktree", "add", "--detach", "--force", str(destination), sha, cwd=path)
+
+
+def remove_worktree(path: Path, destination: Path) -> None:
+    """Take the worktree away again. Never fatal: it is a temporary directory."""
+    try:
+        git("worktree", "remove", "--force", str(destination), cwd=path)
+    except GitError:
+        shutil.rmtree(destination, ignore_errors=True)
+        try:
+            git("worktree", "prune", cwd=path)
+        except GitError:  # pragma: no cover - prune fails only if git itself does
+            pass
 
 
 def tracked_files(path: Path) -> list[str]:

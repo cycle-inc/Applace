@@ -15,7 +15,7 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any
 
-from . import github, policy
+from . import github, policy, vercel
 from .paths import ApplacePaths
 from .stacks import StackError, registry
 
@@ -53,12 +53,28 @@ def describe(paths: ApplacePaths) -> dict[str, Any]:
         else None
     )
 
+    production = policy.DEFAULT_RULE
     try:
         rules = policy.load(paths)
         out["policy"] = {"summary": rules.summary(), **rules.as_dict()}
+        production = rules.production_deploys
     except policy.PolicyError as exc:
         # Say it here rather than let the agent discover it as a red gate.
         out["policy"] = {"error": str(exc)}
+
+    # Where an app can be shipped from this machine. `local` is always there;
+    # saying so is how an agent knows deploying is available before it asks a
+    # human for an account it does not need.
+    hosted = vercel.load(paths)
+    out["deploy"] = {
+        "targets": ["local", "vercel"] if hosted is not None else ["local"],
+        "vercel": {"team": hosted.team} if hosted is not None else None,
+        "production": production,
+        "note": (
+            "a production deploy needs a human's confirmation, whatever the "
+            "policy says"
+        ),
+    }
     return out
 
 

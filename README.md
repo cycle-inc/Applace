@@ -25,14 +25,16 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M6 are shipped**: the store (apps as git repositories), the compiler
+**M1 to M7 are shipped**: the store (apps as git repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
 real browser, its console and its failed requests), GitHub (every new app is a
-repository in your organisation, and every green snapshot is pushed there), and
-the skill (the document an agent reads, the dependency policy, and the secret
-path). Deployment is specified in [SPEC.md](SPEC.md) and not yet built. The
-milestone list there is the roadmap, and it is followed in order.
+repository in your organisation, and every green snapshot is pushed there), the
+skill (the document an agent reads, the dependency policy, and the secret path),
+and deployment (a commit served from this machine or shipped to Vercel through
+its own repository, with production gated on a human). Company stacks and the
+handover to a human are next. The milestone list in [SPEC.md](SPEC.md) is the
+roadmap, and it is followed in order.
 
 ### Try it
 
@@ -116,6 +118,42 @@ uv run applace policy       # what is in force
 uv run applace skill        # what an agent is told, and what this machine is
 ```
 
+### Ship it
+
+A preview is a dev server on a laptop. A deployment is a **commit** built and
+put somewhere it can be opened — never the working tree, so a half-written file
+cannot reach anybody.
+
+```bash
+uv run applace deploy team-dashboard                      # local: no account needed
+uv run applace deploy team-dashboard --production         # asks before it does it
+uv run applace deployments team-dashboard                 # what went out, and when
+uv run applace rollback team-dashboard                    # the previous commit, back
+```
+
+`--target local` runs the real production build and serves the result from this
+machine on a port of its own. It is the honest rehearsal: a page that works here
+has cleared everything except the provider.
+
+For Vercel, connect once; deployments then go through the app's GitHub
+repository, so what is live always names a sha (an app with no repository falls
+back to uploading its build, and says so).
+
+```bash
+uv run applace vercel connect --team acme     # APPLACE_VERCEL_TOKEN or VERCEL_TOKEN
+uv run applace vercel status
+uv run applace deploy team-dashboard -t vercel
+uv run applace deploy team-dashboard -t vercel --production
+```
+
+Environment values are pushed to the target's environment for you, by name —
+the values you typed, never the names an agent invented for them.
+
+**Production always needs a human.** `deploy_app` refuses it with
+`code: "confirm-required"` unless `confirm: true`, the CLI asks before it builds
+anything, and `exposure.production_deploys: deny` in the policy refuses it
+outright. The policy can tighten that rule; nothing loosens it.
+
 ### As an MCP server
 
 ```bash
@@ -125,8 +163,10 @@ uv run applace serve --http 8848
 
 Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
 `get_app`, `read_files`, `write_files`, `set_env`, `start_preview`,
-`stop_preview`, `screenshot_app`. `get_skill` is the one to call first: it
-returns the skill document plus what this particular machine does.
+`stop_preview`, `screenshot_app`, `deploy_app`, `rollback_app`. `get_skill` is
+the one to call first: it returns the skill document plus what this particular
+machine does — which stacks it has, whether it pushes to GitHub, what the policy
+allows, and where it can deploy.
 
 ### Design
 

@@ -200,14 +200,14 @@ def start(
         raise PreviewError(f"the {stack.name} stack declares no dev command")
 
     chosen = port if port is not None else _free_port(conn)
-    if port is not None and not _is_free(port):
+    if port is not None and not port_is_free(port):
         raise PreviewError(f"port {port} is already in use by something else.")
     command = command_template.format(port=chosen, host=HOST)
     url = f"http://{HOST}:{chosen}/"
 
     log_path = paths.app_logs(slug) / LOG_NAME
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    pid = _spawn(command, cwd=root, log_path=log_path, environment=environment)
+    pid = spawn(command, cwd=root, log_path=log_path, environment=environment)
 
     upsert_preview(
         conn,
@@ -244,7 +244,7 @@ def stop(conn: Connection, app_id: str, slug: str, root: Path) -> bool:
     conn.commit()
     if not running:
         return False
-    _terminate(pid)
+    terminate(pid)
     return True
 
 
@@ -273,7 +273,7 @@ def tail(log_path: Path, lines: int = LOG_TAIL) -> str:
 # -- the awkward parts -----------------------------------------------------
 
 
-def _spawn(
+def spawn(
     command: str,
     *,
     cwd: Path,
@@ -312,7 +312,7 @@ def _spawn(
     return process.pid
 
 
-def _terminate(pid: int) -> None:
+def terminate(pid: int) -> None:
     """SIGTERM the group, then SIGKILL what is left of it."""
     try:
         group = os.getpgid(pid)
@@ -378,7 +378,7 @@ def _free_port(conn: Connection) -> int:
     """A port nothing else on this machine, and no other app, is using."""
     claimed = claimed_ports(conn)
     for candidate in PORT_RANGE:
-        if candidate not in claimed and _is_free(candidate):
+        if candidate not in claimed and port_is_free(candidate):
             return candidate
     raise PreviewError(
         f"no free port between {PORT_RANGE.start} and {PORT_RANGE.stop - 1}. "
@@ -386,7 +386,7 @@ def _free_port(conn: Connection) -> int:
     )
 
 
-def _is_free(port: int) -> bool:
+def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         # SO_REUSEADDR because node sets it: the question this answers is "could
         # the dev server bind here", and without it a port whose last connection
