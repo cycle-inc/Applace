@@ -8,11 +8,10 @@ structured results are all part of what these tests check.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
+from conftest import call_tool
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult
 
 from applace.db import Connection
 from applace.paths import ApplacePaths
@@ -27,16 +26,12 @@ TOOLS = {
     "get_app",
     "read_files",
     "write_files",
+    "start_preview",
+    "stop_preview",
 }
 
 
-def call(server: MCPServer, tool: str, /, **arguments: Any) -> dict[str, Any]:
-    result = asyncio.run(server.call_tool(tool, arguments))
-    assert isinstance(result, CallToolResult), result
-    assert not result.is_error, result.content
-    if result.structured_content is not None:
-        return dict(result.structured_content)
-    return dict(json.loads(result.content[0].text))  # type: ignore[union-attr]
+call = call_tool
 
 
 def tools_of(server: MCPServer) -> dict[str, Any]:

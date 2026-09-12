@@ -14,12 +14,21 @@ from typing import Annotated
 import typer
 
 from . import gate
-from .apps import AppError, app_detail, create_app, remove_app, require_app
+from .apps import (
+    AppError,
+    app_detail,
+    create_app,
+    remove_app,
+    require_app,
+    start_preview,
+    stop_preview,
+)
 from .db import connect, list_apps
 from .gate import GateReport
 from .init_cmd import InitReport, run_init
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
+from .preview import PreviewError
 from .server import serve as serve_server
 from .stacks import StackError, registry
 
@@ -159,11 +168,57 @@ def list_command() -> None:
                 else ("dirty" if detail.get("dirty") else "clean")
             )
             commit = (detail.get("commit") or "")[:12] or "-"
+            live = detail.get("preview")
+            where = f"  {live['url']}" if live else ""
             typer.echo(
-                f"{str(row['slug']):<24} {str(row['stack']):<16} {state:<8} {commit}"
+                f"{str(row['slug']):<24} {str(row['stack']):<16} {state:<8} {commit}{where}"
             )
     finally:
         conn.close()
+
+
+@app.command()
+def dev(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    port: Annotated[
+        int | None, typer.Option("--port", "-p", help="Use this port instead of a free one.")
+    ] = None,
+) -> None:
+    """Run the app's dev server in the background and print its URL.
+
+    It outlives this command: stop it with `applace stop`.
+    """
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        running = start_preview(paths, conn, name, port=port)
+    except (AppError, StackError, PreviewError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(running.url)
+    typer.echo(f"  pid  {running.pid}")
+    typer.echo(f"  log  {running.log}")
+
+
+@app.command()
+def stop(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+) -> None:
+    """Stop the app's dev server."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        stopped = stop_preview(conn, name)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"Stopped {name}" if stopped else f"{name} was not running")
 
 
 @app.command()

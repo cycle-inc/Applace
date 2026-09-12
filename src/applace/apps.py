@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import gitrepo, shell
+from . import gitrepo, preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots
@@ -214,6 +214,8 @@ def app_detail(
     detail["snapshots"] = len(list_snapshots(conn, str(row["id"])))
     detail["installed"] = (path / "node_modules").is_dir()
     detail.update(outstanding(conn, str(row["id"])))
+    live = preview.status(conn, str(row["id"]), str(row["slug"]), path)
+    detail["preview"] = live.as_dict() if live is not None else None
     if stack is not None:
         detail["entry"] = stack.entry
         detail["env_prefix"] = stack.env_prefix
@@ -237,12 +239,37 @@ def outstanding(conn: Connection, app_id: str) -> dict[str, Any]:
     }
 
 
+def start_preview(
+    paths: ApplacePaths, conn: Connection, key: str, *, port: int | None = None
+) -> preview.Preview:
+    """Run the app's dev server, or hand back the one already running."""
+    row = require_app(conn, key)
+    return preview.start(
+        paths,
+        conn,
+        app_id=str(row["id"]),
+        slug=str(row["slug"]),
+        root=Path(str(row["path"])),
+        stack=resolve(paths.stacks, str(row["stack"])),
+        port=port,
+    )
+
+
+def stop_preview(conn: Connection, key: str) -> bool:
+    """Stop the app's dev server. False when there was nothing running."""
+    row = require_app(conn, key)
+    return preview.stop(conn, str(row["id"]), str(row["slug"]), Path(str(row["path"])))
+
+
 def remove_app(
     paths: ApplacePaths, conn: Connection, key: str, *, delete_files: bool
 ) -> Path:
     """Forget an app, and optionally delete its repository."""
     row = require_app(conn, key)
     path = Path(str(row["path"]))
+    # Before the row goes: after it, nothing knows which process to signal and
+    # the port stays held until someone finds it by hand.
+    preview.stop(conn, str(row["id"]), str(row["slug"]), path)
     conn.execute("DELETE FROM apps WHERE id = ?", (str(row["id"]),))
     conn.commit()
     if delete_files and path.is_dir() and path.parent == paths.apps:

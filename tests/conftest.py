@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import shutil
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 from applace.db import Connection, connect
 from applace.paths import ApplacePaths
@@ -77,3 +80,19 @@ def npm() -> str:
     if executable is None:
         pytest.skip("npm is not on PATH")
     return executable
+
+
+def call_tool(server: Any, tool: str, /, **arguments: Any) -> dict[str, Any]:
+    """Call an MCP tool the way a host does, and return its structured result.
+
+    Shared by every test that goes through the server rather than around it, so
+    the unwrapping of a CallToolResult is written once.
+    """
+    result = asyncio.run(server.call_tool(tool, arguments))
+    assert isinstance(result, CallToolResult), result
+    assert not result.is_error, result.content
+    if result.structured_content is not None:
+        return dict(result.structured_content)
+    content = result.content[0]
+    assert isinstance(content, TextContent), content
+    return dict(json.loads(content.text))

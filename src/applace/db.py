@@ -72,6 +72,19 @@ MIGRATIONS: list[str] = [
         written_json  TEXT,
         created_at  TEXT NOT NULL
     )""",
+    # v3 (M3): the dev server an app currently has, at most one. The row is a
+    # claim on a port and a process, not a guarantee: the process may be gone by
+    # the time anyone reads it, which is why `command` is stored -- it is how a
+    # restarted supervisor tells its own process from whatever reused the pid.
+    """CREATE TABLE IF NOT EXISTS previews (
+        app_id     TEXT PRIMARY KEY REFERENCES apps(id) ON DELETE CASCADE,
+        port       INTEGER NOT NULL,
+        pid        INTEGER NOT NULL,
+        url        TEXT NOT NULL,
+        command    TEXT NOT NULL,
+        log_path   TEXT NOT NULL,
+        started_at TEXT NOT NULL
+    )""",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -248,6 +261,57 @@ def latest_snapshot(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None
         "SELECT * FROM snapshots WHERE app_id = ? ORDER BY rowid DESC LIMIT 1",
         (app_id,),
     ).fetchone()
+
+
+# -- previews --------------------------------------------------------------
+
+
+def upsert_preview(
+    conn: sqlite3.Connection,
+    *,
+    app_id: str,
+    port: int,
+    pid: int,
+    url: str,
+    command: str,
+    log_path: str,
+) -> None:
+    """Claim a port and a process for an app, replacing any earlier claim."""
+    conn.execute(
+        """
+        INSERT INTO previews(app_id, port, pid, url, command, log_path, started_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(app_id) DO UPDATE SET
+            port = excluded.port, pid = excluded.pid, url = excluded.url,
+            command = excluded.command, log_path = excluded.log_path,
+            started_at = excluded.started_at
+        """,
+        (app_id, port, pid, url, command, log_path, now_iso()),
+    )
+
+
+def find_preview(conn: sqlite3.Connection, app_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM previews WHERE app_id = ?", (app_id,)
+    ).fetchone()
+
+
+def list_previews(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every claimed preview, with the app it belongs to."""
+    return list(
+        conn.execute(
+            "SELECT previews.*, apps.slug, apps.path FROM previews "
+            "JOIN apps ON apps.id = previews.app_id ORDER BY apps.slug"
+        )
+    )
+
+
+def delete_preview(conn: sqlite3.Connection, app_id: str) -> None:
+    conn.execute("DELETE FROM previews WHERE app_id = ?", (app_id,))
+
+
+def claimed_ports(conn: sqlite3.Connection) -> set[int]:
+    return {int(row["port"]) for row in conn.execute("SELECT port FROM previews")}
 
 
 def list_snapshots(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:

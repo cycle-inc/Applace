@@ -16,9 +16,12 @@ from mcp.server.mcpserver import MCPServer
 
 from . import gate
 from .apps import AppError, app_detail, app_summary, create_app, require_app
+from .apps import start_preview as start_preview_for
+from .apps import stop_preview as stop_preview_for
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
 from .gitrepo import GitError
+from .preview import PreviewError
 from .naming import InvalidName
 from .paths import ApplacePaths, paths as default_paths
 from .stacks import StackError, registry
@@ -34,7 +37,8 @@ tree, read_files and write_files to change it.
 
 write_files is a compiler: every write is type-checked, linted and built before
 it is kept, and you get the real tool's errors back with file and line when it
-is not. Nothing you create is thrown away -- every green change is a commit.
+is not. start_preview gives a human a URL to watch while you work. Nothing you
+create is thrown away -- every green change is a commit.
 """
 
 
@@ -131,6 +135,43 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             except AppError as exc:
                 return {"ok": False, "code": "unknown-app", "error": str(exc)}
             return {"ok": True, **app_detail(home, conn, row)}
+
+    # Sync: starting a dev server waits for it to answer, which is seconds.
+    @server.tool()
+    def start_preview(app: str) -> dict[str, Any]:
+        """Run the app so a human can look at it, and get back a URL.
+
+        Idempotent: calling it again while the app is already previewing hands
+        back the same URL rather than starting a second server. The server keeps
+        running between your tool calls and reloads by itself when you write, so
+        start it once and leave it.
+
+        On failure `code` is unknown-app or preview-failed; `error` then carries
+        the end of the dev server's own log.
+        """
+        with session() as conn:
+            try:
+                running = start_preview_for(home, conn, app)
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            except StackError as exc:
+                return {"ok": False, "code": "unknown-stack", "error": str(exc)}
+            except PreviewError as exc:
+                return {"ok": False, "code": "preview-failed", "error": str(exc)}
+            return {"ok": True, **running.as_dict()}
+
+    @server.tool()
+    def stop_preview(app: str) -> dict[str, Any]:
+        """Stop the app's dev server and give the port back.
+
+        `stopped` is false when nothing was running, which is not an error.
+        """
+        with session() as conn:
+            try:
+                stopped = stop_preview_for(conn, app)
+            except AppError as exc:
+                return {"ok": False, "code": "unknown-app", "error": str(exc)}
+            return {"ok": True, "app": app, "stopped": stopped}
 
     @server.tool()
     def read_files(app: str, paths: list[str]) -> dict[str, Any]:

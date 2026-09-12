@@ -9,7 +9,7 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 and M2 are shipped.** M3 is next and is not yet built.
+> **Status: M1, M2 and M3 are shipped.** M4 is next and is not yet built.
 
 ## What v1 is
 
@@ -206,10 +206,23 @@ read before and after the write, which is also where `new_deps` comes from.
 And **the path lint runs on the whole batch before anything is written**, so a
 refusal leaves the app byte-for-byte as it was.
 
-**M3 — The preview.** The dev-server supervisor: port allocation, start, stop,
-idempotence, log capture, and recovery of a preview whose supervisor was restarted.
-*Acceptance:* the URL returns the app's HTML; restart the harness and the preview is
-still reachable or is cleanly reaped.
+**M3 — The preview.** *Shipped.* The dev-server supervisor: port allocation,
+start, stop, idempotence, log capture, and recovery of a preview whose supervisor
+was restarted, plus the CLI verbs `dev` and `stop`.
+*Acceptance:* `scripts/m3_acceptance.sh` — the URL returns the app's HTML; a new
+server object over the same home finds the preview still running; stopping gives
+the port back.
+
+What M3 learned. **A database row about a process is a claim, not a fact**: the
+process may be gone and its pid may have been reused, so a claim is checked
+against the live process's own command line before it is believed, and reaped
+when it does not hold up — that check is the whole of "recovery". **A zombie is
+not a running server**: it still has a pid and `ps` still prints it, so the
+liveness check reads the process state and treats `Z` as gone, and every kill
+path collects the child afterwards. And **"is this port free" must be asked the
+way node asks it**, with `SO_REUSEADDR`: without it every port Applace just
+stopped a preview on reads as busy for the two minutes its last connection
+spends in `TIME_WAIT`.
 
 **M4 — The eyes.** `screenshot_app`, browser console capture, failed-request
 capture, route and viewport selection.
