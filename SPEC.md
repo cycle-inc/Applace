@@ -467,6 +467,17 @@ it, a `/panel` page that uses the element it recommends, and
 `examples/chat/chat.py` standing up against that harness — reading the skill,
 serving a page that embeds the panel, and surviving a model that is not there.
 
+*Blind:* the reference chatbot itself, with `mistral-large-latest` behind it and
+a $0.50 cap, asked in one sentence for a page showing which of three internal
+services are up. Two turns, $0.13 in total: it created the app, read the stack's
+`App.tsx`, wrote a page that passed the gate first time, looked at it with the
+eyes and described what it saw; then added the last-checked time and deployed it
+locally. The chat said *Creating “Service Status Dashboard” · Reading 1 file ·
+Writing 1 file, and building · Looking at the page · Putting it online* — and the
+card beside it went from `new` to green to "Green, and what is live is this
+commit" with the screenshot, the preview and the deployment all in `urls`. The
+model was never told anything about Applace that `get_skill` did not tell it.
+
 What M10 learned. **A chat window is a different reader, not a smaller one.**
 `get_app` is exhaustive because an agent is about to write code; a card is one
 state, one sentence and the links, because it is about to be rendered next to a
