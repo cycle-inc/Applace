@@ -390,6 +390,12 @@ reported as news and not as a refusal, `applace open --print` names the preview,
 the repository and the directory, and the built wheel — run through `uvx` from a
 directory with no checkout in it — initialises a home that already knows
 `vite-react-ts` and prints SKILL.md.
+*Blind:* `scripts/blind_handover.py` asks a hosted model the same question with
+no hint of any of this. `mistral-large-latest` warned by `get_app` never
+attempted the write and told the human to commit or discard (2 rounds, $0.023);
+the same model surprised mid-task — the person starts typing after it has read
+the file — was refused, stopped on the first refusal, and said what it had been
+about to change (4 rounds, $0.051). Their bytes survived both.
 
 What M9 learned. **The refusal has to be per path, not per repository.** A
 harness that stopped because *any* file was dirty would be one nobody leaves
