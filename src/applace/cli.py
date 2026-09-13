@@ -65,6 +65,8 @@ from .stackstore import drift as stack_drift
 from .stackstore import remove as remove_stack
 from .stackstore import update as update_stack
 from .sync import adopt_app, push_app
+from .takeover import TakeError, TakeReport
+from .takeover import take as take_over
 from .vercel import VercelError, VercelLink
 from .vercel import api as vercel_api
 from .vercel import load as vercel_load
@@ -195,6 +197,85 @@ def new(
         typer.echo(f"  github  {report.github_url}  ({state})")
     for warning in report.warnings:
         typer.secho(f"\n{warning}", fg=typer.colors.YELLOW, err=True)
+
+
+@app.command()
+def take(
+    source: Annotated[
+        str,
+        typer.Argument(help="A checkout on this machine, or a URL to clone."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="What to call it. Defaults to the directory."),
+    ] = None,
+    stack: Annotated[
+        str | None,
+        typer.Option("--stack", "-s", help="Skip recognition and use this stack."),
+    ] = None,
+    check: Annotated[
+        bool,
+        typer.Option("--check/--no-check", help="Run the gate once, as a report."),
+    ] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Say what would happen and record nothing."),
+    ] = False,
+) -> None:
+    """Take over a front end that already exists, without changing it (D26).
+
+    The repository keeps its history, its files and its remote; Applace keeps a
+    row. A local checkout stays where it is. This is not `applace github adopt`,
+    which points an app Applace already has at an existing GitHub repository.
+    """
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        report = take_over(
+            paths,
+            conn,
+            source=source,
+            name=name,
+            stack_name=stack,
+            check=check,
+            dry_run=dry_run,
+        )
+    except (TakeError, AppError, InvalidName, StackError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    typer.echo(format_take(report))
+    for warning in report.warnings:
+        typer.secho(f"  note    {warning}", fg=typer.colors.YELLOW, err=True)
+    if report.gate is not None:
+        typer.echo("")
+        typer.echo(format_gate(report.gate))
+        if not report.gate.ok:
+            # Deliberately not an exit code: the app was taken over, and a
+            # codebase that is already red is the normal case (D26).
+            typer.secho(
+                "This app does not build yet. It is taken over all the same — "
+                "`applace check` again once it is fixed.",
+                fg=typer.colors.YELLOW,
+            )
+
+
+def format_take(report: TakeReport) -> str:
+    how = " + ".join(report.recognised_by)
+    lines = [
+        f"{report.slug}  {report.path}",
+        f"  stack   {report.stack}  (recognised by {how})",
+        f"  git     {report.branch} at {(report.commit or '')[:12]}, "
+        f"{report.commits} commits, {report.files} files — kept as they are",
+    ]
+    if report.remote:
+        lines.append(f"  remote  {report.remote}")
+    if report.dry_run:
+        lines.append("  dry run — nothing was recorded and nothing was changed")
+    return "\n".join(lines)
 
 
 @app.command("ls")
@@ -1019,7 +1100,11 @@ def github_adopt(
     name: Annotated[str, typer.Argument(help="The app's slug.")],
     repo: Annotated[str, typer.Option("--repo", help="owner/name of the repository.")],
 ) -> None:
-    """Point an existing app at a repository that already exists."""
+    """Point an app's GitHub remote at a repository that already exists (D2).
+
+    The app is one Applace already has; only where it is pushed changes. To make
+    a codebase that already exists into an app, the command is `applace take`.
+    """
     paths = _home()
     _require_home(paths)
     conn = connect(paths.db)

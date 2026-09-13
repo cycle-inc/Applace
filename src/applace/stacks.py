@@ -62,6 +62,11 @@ class Stack:
     # every route is behind a login cannot be visited anonymously, and saying so
     # once here beats every app on it discovering it one red gate at a time.
     visit: bool = True
+    # What an existing front end has to depend on to be recognised as this stack
+    # (D26). Every name must be in the manifest, and a stack that declares none
+    # is never recognised -- `take` refuses rather than guessing, and a stack
+    # that has not said what it looks like has not been asked for a guess.
+    recognise: tuple[str, ...] = ()
     deploy: list[str] = field(default_factory=list)
     source: str = BUILTIN
     commit: str | None = None
@@ -80,6 +85,7 @@ class Stack:
             "env_prefix": self.env_prefix,
             "gateway": self.gateway,
             "visit": self.visit,
+            "recognise": list(self.recognise),
             "deploy": list(self.deploy),
             "source": self.source,
             # The commit a company stack is pinned at. An agent does not act on
@@ -173,6 +179,17 @@ def load(
         )
 
     deploy_raw = raw.get("deploy") or []
+    recognise_raw = raw.get("recognise") or []
+    if isinstance(recognise_raw, dict):
+        # `recognise: {dependencies: [...]}` reads better in a company's own
+        # stack.yaml and leaves room for a second key later without breaking the
+        # short form, which is a bare list of dependency names.
+        recognise_raw = recognise_raw.get("dependencies") or []
+    if isinstance(recognise_raw, str) or not isinstance(recognise_raw, list):
+        raise StackError(
+            f"stack {stack_name!r} declares `recognise` as {type(recognise_raw).__name__}; "
+            f"it is a list of dependency names an existing app must have"
+        )
     return Stack(
         name=stack_name,
         title=str(raw.get("title") or stack_name),
@@ -187,6 +204,7 @@ def load(
         entry=str(raw.get("entry") or ""),
         gateway=str(raw.get("gateway") or ""),
         visit=raw.get("visit", True) is not False,
+        recognise=tuple(str(d) for d in recognise_raw),
         deploy=[str(d) for d in deploy_raw],
         source=source,
         commit=commit,

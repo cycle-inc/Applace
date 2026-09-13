@@ -49,6 +49,12 @@ never run `git`, and never edit files outside the app.
   install, is reported, and may be refused by this machine's policy. React,
   the router and the styling are already there. Check `package.json` before
   reaching for a library.
+- **Some apps were here before Applace was.** If `get_app` says `taken_from`,
+  this repository was written by a team and Applace was pointed at it later. The
+  stack above describes how it is *built*, not how it is laid out: there may be
+  no `src/App.tsx`, the conventions are the codebase's own, and its authors are
+  still working in it. Read more of it than you would of an app you created, and
+  match what is there rather than what this document shows.
 - **A human may be in the repository too.** `get_app` reports `human`: commits
   somebody made by hand, and files they are editing right now. `write_files`
   replaces whole files, so it refuses to write one with uncommitted changes

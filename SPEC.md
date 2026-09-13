@@ -9,11 +9,13 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M14 are shipped** — the whole harness a developer drives, the
+> **Status: M1 to M15 are shipped** — the whole harness a developer drives, the
 > panel that puts it inside a chat window, which is where a company's users
 > actually are, the gateway that lets an app read the company's own APIs without
-> a credential ever reaching the browser, and a gate that ends in a real browser
-> so a green build that paints a white screen is a red write.
+> a credential ever reaching the browser, a gate that ends in a real browser
+> so a green build that paints a white screen is a red write, and a way in for
+> the front ends a company already has: `take` adopts a repository as it stands,
+> writing nothing into it.
 
 ## What v1 is
 
@@ -791,28 +793,73 @@ the gateway's handler and overrides one method — who may call — rather than
 keeping a second copy of the allowlist that would disagree the first time either
 was touched.
 
-**M15 — The take-over.** Per D26. `take` is the front ends that already exist;
-the older `adopt`, which points an Applace app at a GitHub repository that
-already exists (D2), keeps its name and its meaning, and the documentation
-stops letting the two be confused.
+**M15 — The take-over.** *Shipped.* Per D26. `take` is the front ends that
+already exist; the older `adopt`, which points an Applace app at a GitHub
+repository that already exists (D2), keeps its name and its meaning, and the
+documentation no longer lets the two be confused.
 
-1. **`ap.take(source, name=...)` and `applace take <path-or-url>`.** Clone the
-   repository or record the checkout, recognise the stack from the manifest and
-   the lockfile, refuse rather than guess when nothing matches, and keep the
-   git history exactly as it is.
-2. **Nothing is written into the tree.** The stack, the routes and the API
-   declarations live in the journal. An adopted app is the case that proves D1.
-3. **The first gate is a report, not a verdict.** A codebase that is already red
-   is adopted anyway and told so; refusing red would be refusing every real
-   codebase in the building.
-4. **`--dry-run`** says what it would recognise and changes nothing.
+1. **`ap.take(source, name=...)` and `applace take <path-or-url>`.** A URL is
+   cloned into `~/.applace/apps` with its full history; a checkout on disk is
+   recorded **where it is**, because moving it would break every editor and
+   shell already open on it — and `remove_app`'s rule that it may only delete
+   under `~/.applace/apps` is what keeps `rm --delete-files` from deleting
+   somebody's own repository. The stack is **recognised, never guessed**: a
+   stack declares in `stack.yaml` what a tree must depend on to be called that
+   stack (`recognise:`), the most specific claim wins, a tie is a refusal naming
+   both stacks, and nothing matching is a refusal naming what each stack looked
+   for and what the manifest actually declares. Silence is not a claim: a stack
+   that has not said what it looks like is never recognised. `--stack` overrides
+   the whole question. `take` is not an MCP tool (D19) — pointing Applace at a
+   path on a developer's disk is a human's decision, like `connect_github`.
+2. **Nothing is written into the tree.** No config key, no marker, no import,
+   no commit: `take` adds a row and a snapshot of the HEAD it found. What
+   Applace knows about the app — stack, routes, API declarations, env names —
+   is in the journal, and the journal gains one column, `taken_from`, which is
+   NULL for every app Applace created itself. The repository may not say that
+   Applace exists, but `get_app` has to: an agent that expects the stack's
+   template and finds a team's own file tree is an agent about to rewrite it, so
+   `taken_from` reaches the skill as *read more of this than you would of an app
+   you created*. An adopted app is the case that proves D1.
+3. **The first gate is a report, not a verdict.** `gate.write_files(...,
+   commit=False)` runs the five stages and commits nothing. A codebase that is
+   already red is adopted anyway and told so; refusing red would be refusing
+   every real codebase in the building. Committing green would be worse: it
+   would swallow whatever a person had uncommitted in their own tree at the
+   moment they ran the command.
+4. **`--dry-run`** says what it would recognise and changes nothing — a URL is
+   cloned into a scratch directory that is deleted before the command returns,
+   and no row is written.
 
-*Acceptance:* `scripts/m15_acceptance.sh` — a front end living outside Applace,
-with commits of its own, is taken over; it appears in `apps()` with its stack
-recognised; `git log` and `git status` are byte-identical to what they were
-before, and no file was added; the gate runs on it, a preview serves it, and a
-green write lands as a commit in its own history; a directory that is not a
-recognisable front end is refused with what was looked for.
+*Acceptance:* `scripts/m15_acceptance.sh` — a real Vite front end is built in a
+throwaway home, moved outside Applace, given commits of its own by hand, and the
+factory home deleted, so what remains is an ordinary repository. A dry run
+recognises `vite-react-ts` by `vite + react` and records nothing. The real `take`
+adopts it: `git log`, `git status`, `git ls-files` and `git config` are
+byte-identical to what they were before, no `.applace*` file exists and
+`package.json` is untouched. The first gate is green with the browser visit
+opened, `committed` is false and HEAD has not moved. It lists in `apps()`, a
+preview serves it over HTTP, and an ordinary `write_files` then lands as a commit
+on top of the history it was found with. An express/pg repository is refused with
+`vite-react-ts looks for vite + react`, and a directory that is not a git
+repository is refused with `git init`.
+
+What M15 learned. **The path lint has two halves, and only one of them applies
+to a repository somebody else wrote.** `files.lint_paths` refuses a lockfile,
+because an agent may not write one — run it over an adopted tree and every real
+repository is refused. What `take` has to check is the other half: that no
+tracked path escapes the root. Reusing the wrong half would have rejected the
+entire population this milestone exists for. **A stack that says nothing must
+never be recognised.** The tempting default — fall back to the generic stack —
+is exactly the guess D26 forbids, and it would build a Next.js app with a Vite
+config. **`git check-ignore` needs the trailing slash**: `out` does not match the
+pattern `out/`, `out/` matches both, and the tidy repository was being warned
+about its own correct `.gitignore` until the query was written the way git reads
+it. **The destructive path has to be tested from the adopted side.** The guard
+that saved it was written in M2 for a different reason; a test now pins it,
+because the day it is loosened is the day Applace deletes a team's repository.
+And **an adoption is a report before it is a verdict** — the command's whole job
+is to say what it found, which is why every refusal names what was looked for
+rather than what was missing.
 
 **M16 — The register.** Per D27 — the developer's view, one level above a home.
 

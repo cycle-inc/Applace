@@ -148,12 +148,19 @@ def write_files(
     files_to_write: dict[str, str] | None = None,
     delete: list[str] | None = None,
     message: str | None = None,
+    commit: bool = True,
 ) -> GateReport:
     """Write source into an app and take it through the gate.
 
     With no files this is a plain re-check of whatever is on disk, which is what
     ``applace check`` is and what an agent should call after a human edited the
     repository by hand.
+
+    ``commit=False`` runs the same stages and stops before the commit and the
+    push. It exists for the one caller that must not commit a green tree (D26):
+    the first gate of an app Applace has just taken over, whose working tree may
+    hold edits a person left there and whose history is not ours to add to
+    before anyone has asked for a change.
     """
     row = require_app(conn, app)
     slug = str(row["slug"])
@@ -238,9 +245,11 @@ def write_files(
     report.duration_ms = sum(stage.duration_ms for stage in report.stages)
 
     snapshot_id: str | None = None
-    if report.ok:
+    if report.ok and commit:
         snapshot_id = _snapshot(conn, row, root, report, message)
         report.committed = snapshot_id is not None
+    elif report.ok:
+        report.commit = gitrepo.head(root).sha if gitrepo.has_commits(root) else None
     report.dirty = gitrepo.is_dirty(root)
     _journal(conn, row, report, snapshot_id=snapshot_id)
     conn.commit()
@@ -255,7 +264,12 @@ def write_files(
     # the gate, and a network that is down must not turn a green write red (D2).
     # A green re-check with nothing to commit still pushes, which is how an app
     # whose last push was refused catches up once the divergence is resolved.
-    if report.ok and row["github_repo"] and (report.committed or unpushed(conn, str(row["id"]))):
+    if (
+        report.ok
+        and commit
+        and row["github_repo"]
+        and (report.committed or unpushed(conn, str(row["id"])))
+    ):
         report.push = push_app(paths, conn, require_app(conn, slug))
     return report
 

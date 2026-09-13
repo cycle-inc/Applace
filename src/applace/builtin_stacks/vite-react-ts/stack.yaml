@@ -20,6 +20,13 @@ env_prefix: VITE_
 # says so rather than assuming one.
 gateway: /api/gateway
 entry: src/App.tsx
+# What a front end that already exists has to depend on for `applace take` to
+# call it this stack (D26). Vite alone would also match a Vue or a Svelte app,
+# and React alone would match Next.js, which this stack cannot build.
+recognise:
+  dependencies:
+    - vite
+    - react
 deploy:
   - local
   - vercel

@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, ParamSpec
 
 from . import apps, deploy, env, gate, github, machine, panel, policy, skill
-from . import stackstore, sync, vercel
+from . import stackstore, sync, takeover, vercel
 from .apis import ApiError
 from .apps import AppError, AppExists
 from .db import Connection, connect
@@ -59,6 +59,7 @@ from .policy import PolicyError
 from .preview import PreviewError
 from .sensor import RouteError
 from .stacks import StackError, registry
+from .takeover import TakeError
 from .stackstore import StackInstallError
 from .vercel import VercelError, VercelLink
 
@@ -73,6 +74,7 @@ CODES: tuple[tuple[type[Exception], str], ...] = (
     (EnvError, "invalid-name"),
     (ApiError, "invalid-api"),
     (RouteError, "invalid-route"),
+    (TakeError, "take-refused"),
     (StackInstallError, "stack-install-failed"),
     (StackError, "unknown-stack"),
     (PreviewError, "preview-failed"),
@@ -184,6 +186,45 @@ class Applace:
         with self._session() as conn:
             report = apps.create_app(
                 self.paths, conn, name=name, stack_name=stack, description=description
+            )
+        return {"ok": True, **report.as_dict()}
+
+    @answered
+    def take(
+        self,
+        source: str,
+        name: str | None = None,
+        stack: str | None = None,
+        check: bool = True,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Take over a front end that already exists (D26).
+
+        `source` is a directory on this machine or a URL to clone. The stack is
+        recognised from the manifest; a tree no stack recognises is refused with
+        `code: "take-refused"` saying what was looked for, because guessing
+        which toolchain built somebody's repository is worse than asking.
+
+        Nothing is written into the tree: the app is a row, and a local checkout
+        stays exactly where it is. What comes back holds the first `gate` --
+        a report, not a verdict, and it commits nothing. An app already red is
+        taken over anyway and says so.
+
+        `dry_run=True` recognises and reports without recording anything.
+        """
+        if not dry_run:
+            refused = self._over_quota("apps") or self._over_quota("disk_mb")
+            if refused is not None:
+                return refused
+        with self._session() as conn:
+            report = takeover.take(
+                self.paths,
+                conn,
+                source=source,
+                name=name,
+                stack_name=stack,
+                check=check,
+                dry_run=dry_run,
             )
         return {"ok": True, **report.as_dict()}
 
@@ -579,7 +620,12 @@ class Applace:
 
     @answered
     def adopt(self, app: str, repo: str) -> dict[str, Any]:
-        """Point an app at a repository that already exists, by `owner/name`."""
+        """Point an app's *GitHub remote* at a repository that exists (D2).
+
+        Not to be confused with :meth:`take`: this takes an app Applace already
+        has and pushes it to `owner/name` instead of to a repository it created.
+        `take` is the other direction -- a codebase that exists becoming an app.
+        """
         with self._session() as conn:
             row = apps.require_app(conn, app)
             repository = sync.adopt_app(self.paths, conn, row, repo)

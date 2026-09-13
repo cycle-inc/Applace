@@ -70,6 +70,42 @@ def test_a_stack_that_says_nothing_about_it_gets_visited(paths: ApplacePaths) ->
     assert registry(paths.stacks)[DEFAULT_STACK].visit is True
 
 
+def test_a_stack_says_what_an_app_it_could_take_over_looks_like(tmp_path: Path) -> None:
+    """The long and the short form of `recognise:` mean the same thing (D26)."""
+    head = "commands:\n  install: 'true'\n  dev: 'true'\n  build: 'true'\n"
+    (tmp_path / "stack.yaml").write_text(
+        f"name: acme\n{head}recognise:\n  dependencies:\n    - vite\n    - '@acme/ui'\n",
+        encoding="utf-8",
+    )
+    assert load(tmp_path).recognise == ("vite", "@acme/ui")
+    assert load(tmp_path).summary()["recognise"] == ["vite", "@acme/ui"]
+
+    (tmp_path / "stack.yaml").write_text(
+        f"name: acme\n{head}recognise:\n  - vite\n", encoding="utf-8"
+    )
+    assert load(tmp_path).recognise == ("vite",)
+
+
+def test_a_stack_that_does_not_say_is_never_recognised(paths: ApplacePaths, tmp_path: Path) -> None:
+    """Silence is not a claim: `take` refuses rather than guessing (D26)."""
+    (tmp_path / "stack.yaml").write_text(
+        "name: quiet\ncommands:\n  install: 'true'\n  dev: 'true'\n  build: 'true'\n",
+        encoding="utf-8",
+    )
+    assert load(tmp_path).recognise == ()
+    assert registry(paths.stacks)[DEFAULT_STACK].recognise == ("vite", "react")
+
+
+def test_a_recognise_key_that_is_not_a_list_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "stack.yaml").write_text(
+        "name: wrong\ncommands:\n  install: 'true'\n  dev: 'true'\n  build: 'true'\n"
+        "recognise: vite\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(StackError, match="list of dependency names"):
+        load(tmp_path)
+
+
 def test_a_stack_missing_a_required_command_is_refused(tmp_path: Path) -> None:
     (tmp_path / "stack.yaml").write_text(
         "name: half\ncommands:\n  install: 'true'\n", encoding="utf-8"

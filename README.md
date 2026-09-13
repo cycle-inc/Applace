@@ -27,7 +27,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M14 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M15 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -47,9 +47,10 @@ that refuse instead of queueing, and a collection that stops processes without
 deleting anybody's code), and the gateway (an app reads the company's own APIs
 through a proxy that holds the credential, in preview from a process Applace
 runs and in production from a serverless function committed to your repository,
-so nothing a browser downloads ever holds a token), and the sensor (the gate
+so nothing a browser downloads ever holds a token), the sensor (the gate
 ends in a browser: every declared route is opened, and a white screen under a
-green build is a red write).
+green build is a red write), and the take-over (`applace take` makes a front end
+that already exists into an app without writing a single byte into it).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -89,6 +90,36 @@ uv sync --extra eyes
 uv run playwright install chromium
 uv run applace shot team-dashboard --route /
 ```
+
+### Take over a front end you already have
+
+Your company's apps were not all created by Applace, and the way in cannot be
+"rewrite it here". `take` points Applace at a repository that exists:
+
+```bash
+uv run applace take ~/work/customer-board            # a checkout on this machine
+uv run applace take https://github.com/acme/board    # or a URL to clone
+uv run applace take ~/work/customer-board --dry-run  # say what it would do
+```
+
+The stack is recognised from the manifest — each stack declares in its
+`stack.yaml` what an app of its kind depends on — and a tree nothing recognises
+is **refused, naming what was looked for**, rather than built with a guess you
+would then have to debug. Name one yourself with `--stack` when you know better.
+
+Nothing is written into the repository: no config key, no marker file, no
+import. The history, the working tree and the remote are exactly as they were,
+a local checkout stays where it is, and the app is a row in Applace's database —
+delete it and the repository will not know anything happened. From that moment
+it has a journal, a gate, previews and deploys like any other app.
+
+The first gate runs once as a **report**: it type-checks, lints, builds and
+opens the app, tells you what it found, and commits nothing. A codebase that is
+already red is taken over all the same — refusing red would refuse every real
+codebase in the building.
+
+Not to be confused with `applace github adopt`, which points an app Applace
+already has at an existing GitHub repository.
 
 ### Connect it to your GitHub
 
@@ -155,6 +186,18 @@ uv run applace stacks add https://github.com/acme/web-stack.git   # --ref, --pat
 uv run applace stacks                                             # what is installed, and from where
 uv run applace new "Billing Portal" --stack acme-web
 ```
+
+A stack can also say what an app of its kind looks like, which is how `applace
+take` recognises the front ends you already have — and how a company says "the
+repositories using our design system are mine":
+
+```yaml
+recognise:
+  dependencies: [vite, '@acme/ui']
+```
+
+The most specific claim wins, so a company stack beats the generic one it is
+built on. A stack that says nothing is never recognised.
 
 `examples/acme-stack/` in this repository is a working one — a design system in
 `template/src/ui`, an authenticated API client in `template/src/lib/acme.ts` —
@@ -375,8 +418,11 @@ calls exactly those, so the two doors cannot answer the same question
 differently.
 
 The class also has what an agent must never have (D19): `set_env` with a
-*value*, `connect_github`, `connect_vercel`, `push`, `adopt`, `install_stack`,
-`remove`, and the panel's `card`/`cards` without the HTTP. None of those is a
+*value*, `connect_github`, `connect_vercel`, `push`, `adopt`, `take`,
+`install_stack`, `remove`, and the panel's `card`/`cards` without the HTTP.
+`take` is on that list deliberately: pointing Applace at a path on somebody's
+disk is a decision about which codebase this is, not a step in building it.
+None of those is a
 tool, and none ever will be — a secret value and a connection are the
 deployment's to decide, not the model's.
 

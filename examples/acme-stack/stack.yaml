@@ -16,6 +16,15 @@ manifest: package.json
 dist: dist
 env_prefix: VITE_
 entry: src/App.tsx
+# Nothing here for `applace take` to recognise (D26), and that is the honest
+# answer for this example: its design system is vendored into template/src/ui
+# rather than installed, so an app built from it depends on nothing that the
+# generic stack's apps do not. A company whose design system is a package adds
+#   recognise:
+#     dependencies: [vite, react, '@acme/ui']
+# and every repository using it is claimed by this stack rather than by the
+# generic one. A stack that claims nothing is never recognised, which is why
+# `take` refuses instead of guessing.
 deploy:
   - local
   - vercel

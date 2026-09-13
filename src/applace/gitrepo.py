@@ -128,6 +128,34 @@ def has_commits(path: Path) -> bool:
     return True
 
 
+def ignores_directory(path: Path, name: str) -> bool:
+    """Would this repository ignore a directory called ``name``?
+
+    `git check-ignore` exits 1 for a path that is *not* ignored, which is an
+    answer rather than a failure -- the only question here is whether a build's
+    output will show up in somebody's `git status` (D26). Asked with a trailing
+    slash, because `out/` in a .gitignore does not match a query for `out`,
+    while `out` matches a query for `out/`.
+    """
+    try:
+        git("check-ignore", "-q", "--no-index", f"{name.rstrip('/')}/", cwd=path)
+    except GitError:
+        return False
+    return True
+
+
+def count_commits(path: Path) -> int:
+    """How much history a repository already has. Zero for an empty one.
+
+    Asked when Applace takes over a front end that existed before it did (D26):
+    the number is the thing being adopted, and saying it back is how a human
+    checks that the take-over kept it.
+    """
+    if not has_commits(path):
+        return 0
+    return int(git("rev-list", "--count", "HEAD", cwd=path).strip() or 0)
+
+
 def is_dirty(path: Path) -> bool:
     """True when the working tree or the index differs from HEAD.
 
@@ -248,6 +276,25 @@ def push(
         url,
         f"HEAD:refs/heads/{branch}",
         cwd=path,
+        env=_authenticated(token),
+    )
+
+
+def clone(url: str, destination: Path, *, token: str | None = None) -> None:
+    """Copy a repository that already exists onto this machine (D26).
+
+    Full history, never shallow: what is cloned becomes an app, and an app's
+    past is the thing Applace promises not to rewrite. `destination` must not
+    exist -- git says so itself, and its message is clearer than ours.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    git(
+        *_credential_args(token),
+        "clone",
+        "--quiet",
+        url,
+        str(destination),
+        cwd=destination.parent,
         env=_authenticated(token),
     )
 

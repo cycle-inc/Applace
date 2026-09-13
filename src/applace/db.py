@@ -164,6 +164,11 @@ MIGRATIONS: list[str] = [
         created_at  TEXT NOT NULL,
         PRIMARY KEY (app_id, path)
     )""",
+    # v11 (M15): where an app was taken over from, and NULL for every app
+    # Applace created itself (D26). The repository may not say that Applace
+    # exists, but the journal has to: an agent that expects the stack's template
+    # and finds somebody else's file tree is an agent about to rewrite it.
+    "ALTER TABLE apps ADD COLUMN taken_from TEXT",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -230,12 +235,13 @@ def insert_app(
     stack_source: str,
     stack_commit: str | None,
     path: str,
+    taken_from: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO apps(id, slug, name, description, stack, stack_source,
-                         stack_commit, path, created_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         stack_commit, path, taken_from, created_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             app_id,
@@ -246,6 +252,7 @@ def insert_app(
             stack_source,
             stack_commit,
             path,
+            taken_from,
             now_iso(),
         ),
     )

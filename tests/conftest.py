@@ -38,6 +38,9 @@ dist: out
 env_prefix: TEST_
 gateway: /api/gateway
 entry: src/main.txt
+recognise:
+  dependencies:
+    - fakedep
 deploy:
   - local
 """

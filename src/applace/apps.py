@@ -233,6 +233,10 @@ def app_summary(conn: Connection, row: Any) -> dict[str, Any]:
         "created_at": str(row["created_at"]),
         "github_url": row["github_url"],
         "commit": snapshot["commit_sha"] if snapshot is not None else None,
+        # Where an app came from when Applace did not make it (D26). None is the
+        # usual answer; a value means the file tree is somebody else's and the
+        # stack's template is a description of it at best.
+        "taken_from": row["taken_from"],
     }
     if not present:
         # The row outlived the directory. Say so plainly rather than raising:
