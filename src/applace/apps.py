@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import deploy, env, eyes, github, gitrepo, handover, preview, shell
+from . import apis, deploy, env, eyes, gateway, github, gitrepo, handover, policy
+from . import preview, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
@@ -380,18 +381,116 @@ def start_preview(
     """Run the app's dev server, or hand back the one already running."""
     row = require_app(conn, key)
     slug = str(row["slug"])
+    stack = resolve(paths.stacks, str(row["stack"]))
+    # The one place that knows an app is about to need both (D24). The preview
+    # supervisor is not told the gateway exists and the gateway is not told an
+    # app is previewing; tying their lifecycles together would mean stopping one
+    # whenever the other stopped, and they do not have the same lifetime.
+    environment = env.values_for(paths, slug)
+    if stack.gateway and apis.declarations(conn, str(row["id"])):
+        running = gateway.ensure(paths, conn)
+        environment.update(
+            gateway.environment(running, slug, gateway.key_for(paths))
+        )
     return preview.start(
         paths,
         conn,
         app_id=str(row["id"]),
         slug=slug,
         root=Path(str(row["path"])),
-        stack=resolve(paths.stacks, str(row["stack"])),
+        stack=stack,
         port=port,
         # The dev server is where a value is actually needed (D8): it goes into
         # the process, not into a file in the repository and not into a report.
-        environment=env.values_for(paths, slug),
+        environment=environment,
     )
+
+
+# -- declared APIs (D24) ----------------------------------------------------
+
+
+def declare_api(
+    home: ApplacePaths, conn: Connection, key: str, **fields: Any
+) -> dict[str, Any]:
+    """`declare_api`: record an upstream this app may call, by name (D24).
+
+    The agent's half of a credential, exactly as :func:`declare_env` is. What is
+    stored is a name, a URL and the *name* of the variable holding the token;
+    the value is supplied by a human and read only by the gateway.
+
+    ``home`` rather than ``paths`` because one of the declaration's own fields is
+    called ``paths`` -- the patterns the app may call -- and the two would
+    collide in the keyword arguments.
+    """
+    paths = home
+    row = require_app(conn, key)
+    slug = str(row["slug"])
+    stack = resolve(paths.stacks, str(row["stack"]))
+    if not stack.gateway:
+        raise apis.ApiError(
+            f"the {stack.name} stack has no gateway, so {slug} cannot reach an "
+            f"API without putting the credential in the browser. Build this "
+            f"against an API that needs no token, or use a stack that has one."
+        )
+    rules = policy.load(paths)
+    api = apis.build(**fields)
+    refused = rules.refuse_api(api.name, api.host)
+    if refused:
+        raise policy.PolicyError(
+            f"{refused}. A human changes that in {paths.policy}."
+        )
+    if api.token_env and stack.env_prefix and api.token_env.startswith(stack.env_prefix):
+        # The whole point of the gateway is that this value stays behind it, and
+        # a name starting with the stack's prefix is a name the bundler inlines.
+        raise apis.ApiError(
+            f"{api.token_env} starts with {stack.env_prefix}, which on the "
+            f"{stack.name} stack means the value is compiled into the bundle the "
+            f"browser downloads. Name it without the prefix: "
+            f"{api.token_env[len(stack.env_prefix) :] or 'CRM_TOKEN'}."
+        )
+
+    apis.declare(conn, app_id=str(row["id"]), api=api)
+    if api.token_env:
+        # Declared here too, so it shows up in `env` beside everything else a
+        # human still has to answer. The gateway is the only reader of the value.
+        env.declare(
+            conn,
+            app_id=str(row["id"]),
+            name=api.token_env,
+            description=f"credential the gateway sends to {api.host} for {api.name}",
+        )
+    declared = env.declarations(
+        conn, paths, app_id=str(row["id"]), slug=slug, prefix=stack.env_prefix
+    )
+    has_value = any(v.name == api.token_env and v.has_value for v in declared)
+    out: dict[str, Any] = {"app": slug, **api.as_dict(), "token_set": has_value}
+    if api.token_env and not has_value:
+        # Declared but unanswered is the normal state right after this call, and
+        # the agent has to be able to say what a human should do about it (D8).
+        out["needs"] = env.instruction(slug, api.token_env)
+        out["hint"] = (
+            f"the gateway refuses the call until {api.token_env} has a value; "
+            f"ask the person you are talking to to run the command in `needs`."
+        )
+    return out
+
+
+def forget_api(conn: Connection, key: str, name: str) -> dict[str, Any]:
+    """Undeclare an upstream. The generated function goes on the next gate."""
+    row = require_app(conn, key)
+    removed = apis.forget(conn, app_id=str(row["id"]), name=name)
+    return {"app": str(row["slug"]), "api": name, "forgotten": removed}
+
+
+def declared_apis(conn: Connection, key: str) -> dict[str, Any]:
+    """Every upstream this app declared, and where its own code fetches them."""
+    row = require_app(conn, key)
+    declared = apis.declarations(conn, str(row["id"]))
+    return {
+        "app": str(row["slug"]),
+        "apis": [api.as_dict() for api in declared],
+        "mount": apis.GATEWAY_PATH,
+    }
 
 
 def screenshot(
@@ -428,7 +527,14 @@ def screenshot(
 def stop_preview(conn: Connection, key: str) -> bool:
     """Stop the app's dev server. False when there was nothing running."""
     row = require_app(conn, key)
-    return preview.stop(conn, str(row["id"]), str(row["slug"]), Path(str(row["path"])))
+    stopped = preview.stop(
+        conn, str(row["id"]), str(row["slug"]), Path(str(row["path"]))
+    )
+    # The gateway holds a credential in memory; the last preview going down is
+    # the moment nothing in this home has a reason for it to still be up.
+    if not preview.running(conn):
+        gateway.stop(conn)
+    return stopped
 
 
 def deploy_app(

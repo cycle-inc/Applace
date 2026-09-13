@@ -9,6 +9,17 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   reactHooks.configs.flat.recommended,
   {
+    // The generated gateway function (D24) runs in node, not in a browser, and
+    // is plain JavaScript on purpose -- ordinary code a human can read, with
+    // nothing of Applace's in it.
+    files: ['api/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: globals.node,
+    },
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {
       ecmaVersion: 2022,

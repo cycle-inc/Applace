@@ -24,6 +24,9 @@ Home = tuple[ApplacePaths, Connection]
 TOOLS = {
     "get_skill",
     "set_env",
+    "use_api",
+    "apis",
+    "drop_api",
     "list_stacks",
     "create_app",
     "list_apps",

@@ -25,7 +25,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M12 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M13 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -39,10 +39,13 @@ handover (a pull request a person merges, a refusal to write over what they
 are editing, and `applace open`), the chat window (a read-only panel on the
 same port, a live card per app, and the one script tag a company's own chatbot
 embeds), the package (`from applace import Applace`, the same behaviours as
-a Python class, with the MCP server rewritten as a skin over it), and the
+a Python class, with the MCP server rewritten as a skin over it), the
 machine (one home per person under a root, ports nobody can collide on, quotas
 that refuse instead of queueing, and a collection that stops processes without
-deleting anybody's code).
+deleting anybody's code), and the gateway (an app reads the company's own APIs
+through a proxy that holds the credential, in preview from a process Applace
+runs and in production from a serverless function committed to your repository,
+so nothing a browser downloads ever holds a token).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -180,6 +183,38 @@ uv run applace env ls team-dashboard
 Values live in `~/.applace/env/<app>.env`, `0600`, outside every repository, and
 are injected into the dev server and the build — never written into the app.
 
+### Calling your company's APIs
+
+A token in front-end code is a published token. So an app never holds one: the
+agent declares the API, and the app fetches a relative path.
+
+```
+use_api { app, name: "crm", base_url: "https://crm.internal/api/v2",
+          token_env: "CRM_TOKEN", paths: ["customers/**"], methods: ["GET"] }
+```
+
+```ts
+const customers = await viaGateway<Customer[]>('crm', 'customers')
+```
+
+In preview, Applace runs a gateway beside the dev server: it adds the credential
+server-side, forwards only the paths and methods that were declared, and refuses
+the rest with a reason. On deploy, the same declaration is compiled into an
+ordinary serverless function committed to **your** repository — no import from
+Applace, nothing to keep if you drop the harness. A `fetch` at a host nobody
+declared is a red gate naming the file and the line, and `policy.yaml` can
+narrow which hosts this machine will proxy to at all:
+
+```yaml
+apis:
+  hosts: ["*.internal", "api.acme.com"]
+```
+
+```bash
+uv run applace api ls team-dashboard    # what it may call, and whether the token is set
+uv run applace api gateway              # the process holding the credentials
+```
+
 ### The policy
 
 `~/.applace/policy.yaml` is what this machine allows. It is checked *before*
@@ -193,6 +228,8 @@ dependencies:
 exposure:
   public_repositories: deny             # allow | confirm | deny
   production_deploys: confirm
+apis:
+  hosts: ["*.internal"]                 # which upstreams the gateway will proxy to
 ```
 
 ```bash
@@ -268,8 +305,9 @@ preview, and keeps itself up to date while the build runs — no npm package, no
 build step, no React version to agree on.
 
 Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
-`get_app`, `read_files`, `write_files`, `set_env`, `start_preview`,
-`stop_preview`, `screenshot_app`, `deploy_app`, `rollback_app`. `get_skill` is
+`get_app`, `read_files`, `write_files`, `set_env`, `use_api`, `apis`,
+`drop_api`, `start_preview`, `stop_preview`, `screenshot_app`, `deploy_app`,
+`rollback_app`. `get_skill` is
 the one to call first: it returns the skill document plus what this particular
 machine does — which stacks it has, whether it pushes to GitHub, what the policy
 allows, and where it can deploy.
@@ -297,9 +335,10 @@ ap.deploy(app, target="local")["url"]
 
 Every method is synchronous and returns a dict with `ok` in it (D18): a failure
 is `{"ok": False, "code": ..., "error": ...}`, so a web handler never has to
-catch anything. The agent's thirteen methods mirror the tools one for one —
+catch anything. The agent's sixteen methods mirror the tools one for one —
 `skill`, `stacks`, `create`, `apps`, `app`, `read`, `write`, `declare_env`,
-`preview`, `stop_preview`, `shot`, `deploy`, `rollback` — and the MCP server
+`declare_api`, `apis`, `forget_api`, `preview`, `stop_preview`, `shot`,
+`deploy`, `rollback` — and the MCP server
 calls exactly those, so the two doors cannot answer the same question
 differently.
 

@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import env, gitrepo, machine, policy as policy_module, preview, shell, vercel
+from . import apis, env, gitrepo, machine, policy as policy_module, preview, shell
+from . import vercel
 from .db import (
     Connection,
     claimed_ports,
@@ -444,6 +445,15 @@ def run(
         warnings.append(
             f"{', '.join(missing)} has no value on this machine, so the build "
             f"will see it empty. `applace env set {app} {missing[0]}` fixes that."
+        )
+    if target == LOCAL and apis.declarations(conn, str(row["id"])):
+        # The local target serves the built bundle and nothing else: there is no
+        # runtime to run the generated function, so every gateway call 404s. Say
+        # so rather than let a page look broken for a reason nobody can see.
+        warnings.append(
+            f"{app} calls declared APIs through {apis.GATEWAY_PATH}, and a local "
+            f"deployment serves static files only, so those calls will 404. Use "
+            f"the preview to exercise them, or deploy to vercel."
         )
     if target == VERCEL:
         warnings.extend(_ensure_pushed(paths, conn, row, chosen))

@@ -21,7 +21,26 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE_URL}${path}`, {
+  return request<T>(`${BASE_URL}${path}`, init)
+}
+
+/**
+ * Call an API that needs a credential, through Applace's gateway.
+ *
+ * `name` is what `use_api` declared. The URL stays relative on purpose: the
+ * token is added on the way out, by a process in development and by a function
+ * in production, and neither one is anything this bundle can read.
+ */
+export async function viaGateway<T>(
+  name: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return request<T>(`/api/gateway/${name}/${path.replace(/^\//, '')}`, init)
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
     ...init,
     headers: {
       'content-type': 'application/json',

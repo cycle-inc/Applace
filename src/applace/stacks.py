@@ -54,6 +54,10 @@ class Stack:
     modules: str = "node_modules"
     env_prefix: str = ""
     entry: str = ""
+    # The path this stack's dev server proxies to Applace's gateway (D24). Empty
+    # means the stack has no gateway, and an app on it cannot declare an API --
+    # which is a clear refusal rather than a call that silently has no token.
+    gateway: str = ""
     deploy: list[str] = field(default_factory=list)
     source: str = BUILTIN
     commit: str | None = None
@@ -70,6 +74,7 @@ class Stack:
             "description": self.description,
             "entry": self.entry,
             "env_prefix": self.env_prefix,
+            "gateway": self.gateway,
             "deploy": list(self.deploy),
             "source": self.source,
             # The commit a company stack is pinned at. An agent does not act on
@@ -175,6 +180,7 @@ def load(
         modules=str(raw.get("modules") or "node_modules"),
         env_prefix=str(raw.get("env_prefix") or ""),
         entry=str(raw.get("entry") or ""),
+        gateway=str(raw.get("gateway") or ""),
         deploy=[str(d) for d in deploy_raw],
         source=source,
         commit=commit,

@@ -126,6 +126,33 @@ MIGRATIONS: list[str] = [
     # afterwards -- by a chat window drawing a card, and by an agent that has to
     # say where its work is a dozen messages later.
     "ALTER TABLE apps ADD COLUMN pull_request_url TEXT",
+    # v8 (M13): the upstreams an app is allowed to call (D24). Names, a base URL
+    # and the *name* of the variable holding the credential -- the same division
+    # as env_vars, for the same reason: everything in this row is safe to print,
+    # to log and to return to a model, and the value it points at is not. The
+    # whole declaration is kept as JSON rather than as columns because it is read
+    # in one piece by three readers -- the gateway, the generated function and
+    # the agent -- and none of them ever queries one field of it.
+    """CREATE TABLE IF NOT EXISTS api_decls (
+        app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        name        TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (app_id, name)
+    )""",
+    # v9 (M13): the home's gateway process, at most one. Per home rather than
+    # per app because it is a proxy, not a server: one port and one process
+    # answer for every app here, and a home with forty apps does not need forty
+    # of them. The row is a claim on a pid exactly as `previews` is, and is
+    # reaped the same way when the process behind it is gone.
+    """CREATE TABLE IF NOT EXISTS gateway (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        port       INTEGER NOT NULL,
+        pid        INTEGER NOT NULL,
+        url        TEXT NOT NULL,
+        log_path   TEXT NOT NULL,
+        started_at TEXT NOT NULL
+    )""",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -413,7 +440,35 @@ def delete_preview(conn: sqlite3.Connection, app_id: str) -> None:
 
 
 def claimed_ports(conn: sqlite3.Connection) -> set[int]:
-    return {int(row["port"]) for row in conn.execute("SELECT port FROM previews")}
+    ports = {int(row["port"]) for row in conn.execute("SELECT port FROM previews")}
+    return ports | {int(row["port"]) for row in conn.execute("SELECT port FROM gateway")}
+
+
+# -- the gateway (M13) ------------------------------------------------------
+
+
+def upsert_gateway(
+    conn: sqlite3.Connection, *, port: int, pid: int, url: str, log_path: str
+) -> None:
+    """Claim the home's one gateway port and process, replacing any earlier claim."""
+    conn.execute(
+        """
+        INSERT INTO gateway(id, port, pid, url, log_path, started_at)
+        VALUES(1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            port = excluded.port, pid = excluded.pid, url = excluded.url,
+            log_path = excluded.log_path, started_at = excluded.started_at
+        """,
+        (port, pid, url, log_path, now_iso()),
+    )
+
+
+def find_gateway(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM gateway WHERE id = 1").fetchone()
+
+
+def delete_gateway(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM gateway WHERE id = 1")
 
 
 # -- environment variables (D8) --------------------------------------------
@@ -444,6 +499,43 @@ def list_env(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
 
 def delete_env(conn: sqlite3.Connection, app_id: str, name: str) -> None:
     conn.execute("DELETE FROM env_vars WHERE app_id = ? AND name = ?", (app_id, name))
+
+
+# -- declared APIs (M13) ----------------------------------------------------
+
+
+def declare_api(
+    conn: sqlite3.Connection, *, app_id: str, name: str, config: dict[str, Any]
+) -> None:
+    """Record an upstream this app may call. Re-declaring replaces it outright.
+
+    Replaces rather than merges: a second declaration of the same name is the
+    agent correcting itself, and a half-updated allowlist -- new paths, old
+    methods -- is a rule nobody wrote and nobody can read.
+    """
+    conn.execute(
+        """
+        INSERT INTO api_decls(app_id, name, config_json, created_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(app_id, name) DO UPDATE SET config_json = excluded.config_json
+        """,
+        (app_id, name, canonical_json(config), now_iso()),
+    )
+
+
+def list_apis(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM api_decls WHERE app_id = ? ORDER BY name", (app_id,)
+        )
+    )
+
+
+def delete_api(conn: sqlite3.Connection, app_id: str, name: str) -> bool:
+    cursor = conn.execute(
+        "DELETE FROM api_decls WHERE app_id = ? AND name = ?", (app_id, name)
+    )
+    return cursor.rowcount > 0
 
 
 # -- deployments (M7) -------------------------------------------------------

@@ -9,9 +9,10 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M10 are shipped** — the whole harness a developer drives, and
-> the panel that puts it inside a chat window, which is where a company's users
-> actually are.
+> **Status: M1 to M13 are shipped** — the whole harness a developer drives, the
+> panel that puts it inside a chat window, which is where a company's users
+> actually are, and the gateway that lets an app read the company's own APIs
+> without a credential ever reaching the browser.
 
 ## What v1 is
 
@@ -669,7 +670,7 @@ an app that touches the company's data, a gate anyone should trust without
 looking, a way in for the front ends a company already has, or an answer to
 "what is running in here". Those are the four.
 
-**M13 — The gateway.** The four deliverables of D24.
+**M13 — The gateway.** *Shipped.* The four deliverables of D24.
 
 1. **The declaration.** `declare_api` — a name, a base URL, the *name* of the
    variable holding the credential, and the paths and methods the app may call.
@@ -678,10 +679,15 @@ looking, a way in for the front ends a company already has, or an answer to
    the app's tree (D1). `policy.yaml` gains the hosts a company permits at all,
    and a declaration outside them is refused the way a denied dependency is
    (D9).
-2. **The gateway in preview.** Applace serves `/__api/<name>/*` on the preview's
-   own origin, adds the credential server-side, forwards only what was declared,
-   and journals what it refuses. Same origin, so there is no CORS question and
-   no browser ever holds a token.
+2. **The gateway in preview.** The app fetches `/api/gateway/<name>/*` on the
+   preview's own origin; the stack's dev server proxies that path to a process
+   Applace runs, which adds the credential server-side and forwards only what
+   was declared. Same origin, so there is no CORS question and no browser ever
+   holds a token. The path is the production one on purpose: the same relative
+   URL is served by the generated function once the app is deployed, so there is
+   no development-only code in the app. One gateway per home, not per app, and
+   it requires a key — loopback is not a boundary on a machine holding many
+   homes (D20).
 3. **The gateway in production.** The declaration compiles to one ordinary
    serverless function, committed with the green snapshot, and the credential is
    synchronised to the target the way M7 already synchronises environment
@@ -701,6 +707,32 @@ is in no file of the repository, in no bundle a browser downloads, in no journal
 row and in no deploy log; the deployed app makes the same call through its own
 function; a write that fetches an undeclared host is red and is not committed;
 and a declaration the policy forbids is refused with the policy's own code.
+
+What M13 learned. **A guide and a control are not two strengths of the same
+thing.** The host lint can be fooled by a computed URL and that is fine; it
+exists to save an agent a round trip. The gateway cannot be fooled, because it
+is the only thing holding the credential — which is why the lint's imperfection
+is written into its docstring rather than filed as a bug. **`customers/**`
+covers `customers`.** Translating the pattern to `customers/*` made the most
+ordinary call there is — the list — a 403, and no human writing that pattern
+means "the index is off limits but every item is fine". The rule had to be
+fixed twice, in the Python allowlist and in the generated JavaScript, which is
+the standing cost of a rule that runs in two languages. **A refusal from the
+policy is not an invalid declaration.** Both were raised as `invalid-api` at
+first, which tells an agent to retry what only a human can change; a policy
+refusal is `policy` and it is final (D22). **The only test that found the real
+bug was the one that ran the real proxy.** Vite forwards headers lowercased,
+the gateway stripped its own key by an exact-case comparison, and so the key
+that proves a caller is this home was travelling to the upstream — a unit test
+with a hand-built request would have passed forever. **Two things that are
+needed together do not have the same lifetime.** One gateway serves a home and
+a preview serves an app, so the supervisor is not told the gateway exists and
+the gateway is not told an app is previewing; the one place that knows both is
+`start_preview`, and the gateway goes down when the last preview does, not when
+any preview does. And **the policy is read per request, not per declaration**:
+a company that tightens `policy.yaml` at noon has tightened it for the process
+already running, which is the difference between a rule and a rule that was
+true once.
 
 **M14 — The sensor.** The behavioural half of the gate, per D25.
 

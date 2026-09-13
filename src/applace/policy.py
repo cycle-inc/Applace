@@ -12,6 +12,12 @@ nobody switches on; a company tightens it by writing ``~/.applace/policy.yaml``.
 human has to be present for, so the policy can require confirmation (the
 default) or refuse it outright.
 
+**Egress is policy too (D24).** An app reaches the company's APIs through the
+gateway, and which hosts the gateway will proxy for is the same kind of question
+as which dependencies may be installed -- so it is answered in the same file, the
+same way, with the same permissive default. A company that has an internal
+domain writes it down and the machine stops proxying anywhere else.
+
 The file is optional and a broken one is loud: a policy that silently reads as
 "allow everything" because of a typo is worse than no policy at all.
 """
@@ -48,7 +54,12 @@ _NPMRC_REGISTRY = re.compile(r"^\s*(?:[^\s=]*:)?registry\s*=\s*(\S+)", re.MULTIL
 
 
 class PolicyError(Exception):
-    """The policy file itself is wrong. Nothing is checked against a guess."""
+    """The policy is the answer: the file is wrong, or it refuses what was asked.
+
+    Both are a human's business and neither is worth retrying, which is why they
+    are one code to a caller (D22): a policy refusal is final until someone edits
+    the file, and an agent that reads `policy` should stop rather than rephrase.
+    """
 
 
 @dataclass(frozen=True)
@@ -76,12 +87,20 @@ class Policy:
     registry: str | None = None
     public_repositories: str = DEFAULT_RULE
     production_deploys: str = DEFAULT_RULE
+    # The hosts the gateway may proxy to (D24). Empty means any, and reported --
+    # the same default as dependencies, for the same reason.
+    hosts: tuple[str, ...] = ()
     source: Path | None = field(default=None, compare=False)
 
     @property
     def restricted(self) -> bool:
-        """Does this policy refuse anything at all?"""
+        """Does this policy refuse any dependency?"""
         return bool(self.allow or self.deny or self.registry)
+
+    @property
+    def narrowed(self) -> bool:
+        """Does this policy refuse anything at all, dependencies or egress?"""
+        return self.restricted or bool(self.hosts)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -96,11 +115,12 @@ class Policy:
                 "public_repositories": self.public_repositories,
                 "production_deploys": self.production_deploys,
             },
+            "apis": {"hosts": list(self.hosts), "restricted": bool(self.hosts)},
         }
 
     def summary(self) -> str:
         """One line an agent can be told without reading the file."""
-        if not self.restricted:
+        if not self.narrowed:
             return "any dependency from the public registry is allowed, and reported"
         parts: list[str] = []
         if self.allow:
@@ -109,6 +129,8 @@ class Policy:
             parts.append(f"{', '.join(self.deny)} may not be added")
         if self.registry:
             parts.append(f"dependencies must come from {self.registry}")
+        if self.hosts:
+            parts.append(f"APIs may only call {', '.join(self.hosts)}")
         return "; ".join(parts)
 
     # -- the checks --------------------------------------------------------
@@ -169,6 +191,22 @@ class Policy:
                 )
         return None
 
+    def refuse_api(self, name: str, host: str) -> str:
+        """Why this machine will not proxy to that host, or "" if it will.
+
+        Checked when the declaration is made *and* when the call is forwarded: a
+        policy tightened after an app was built must take effect on the next
+        request, not on the next rewrite of the app.
+        """
+        if not self.hosts:
+            return ""
+        if _matches(host, self.hosts):
+            return ""
+        return (
+            f"{name} would call {host}, and this machine only proxies to "
+            f"{', '.join(self.hosts)}"
+        )
+
     def rule_for(self, act: str) -> str:
         """The exposure rule for ``public_repositories`` or ``production_deploys``."""
         return str(getattr(self, act, DEFAULT_RULE))
@@ -193,12 +231,14 @@ def load(paths: ApplacePaths) -> Policy:
 
     dependencies = _section(path, raw, "dependencies")
     exposure = _section(path, raw, "exposure")
+    api_section = _section(path, raw, "apis")
     return Policy(
         allow=_names(path, dependencies.get("allow")),
         deny=_names(path, dependencies.get("deny")),
         registry=_registry(path, dependencies.get("registry")),
         public_repositories=_rule(path, exposure, "public_repositories"),
         production_deploys=_rule(path, exposure, "production_deploys"),
+        hosts=_names(path, api_section.get("hosts")),
         source=path,
     )
 

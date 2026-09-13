@@ -267,6 +267,58 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         """
         return applace.declare_env(app, name, description=description)
 
+    @server.tool()
+    def use_api(
+        app: str,
+        name: str,
+        base_url: str,
+        token_env: str | None = None,
+        paths: list[str] | None = None,
+        methods: list[str] | None = None,
+        header: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Let the app call a company API, without the token reaching the browser.
+
+        Anything a page downloads is readable by whoever opens it, so front-end
+        code cannot hold a credential. Declare the API here instead, then write
+        code that fetches the relative path in `fetch` -- Applace proxies it and
+        adds the credential on the way out, in preview and in production alike.
+
+        `name` is a short slug you choose (`crm`, `billing`). `base_url` is the
+        API's root. `token_env` is the **name** of the variable holding the
+        credential -- never the credential. `paths` and `methods` are the
+        allowlist: `["customers/**"]` and `["GET"]` mean exactly that, and the
+        proxy refuses the rest. Declare the narrowest thing that works.
+
+        `needs` in the response is the command for the human to run so the
+        credential exists on their machine. Relay it; you will never see the
+        value. Calling a host you did not declare is a red gate on the next
+        write.
+
+        On failure `code` is unknown-app, invalid-api or policy.
+        """
+        return applace.declare_api(
+            app,
+            name,
+            base_url,
+            token_env=token_env,
+            paths=paths,
+            methods=methods,
+            header=header,
+            description=description,
+        )
+
+    @server.tool()
+    def apis(app: str) -> dict[str, Any]:
+        """The APIs this app may call, and the path to fetch each one under."""
+        return applace.apis(app)
+
+    @server.tool()
+    def drop_api(app: str, name: str) -> dict[str, Any]:
+        """Stop allowing the app to call an API it no longer uses."""
+        return applace.forget_api(app, name)
+
     # Sync: a deploy builds, and a provider build is minutes.
     @server.tool()
     def deploy_app(

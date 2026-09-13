@@ -36,6 +36,7 @@ from .db import (
     claimed_ports,
     delete_preview,
     find_preview,
+    list_previews,
     upsert_preview,
 )
 from .paths import ApplacePaths
@@ -250,6 +251,15 @@ def stop(conn: Connection, app_id: str, slug: str, root: Path) -> bool:
         return False
     terminate(pid)
     return True
+
+
+def running(conn: Connection) -> list[str]:
+    """The slugs of this home's previews that are genuinely up, reaping the rest."""
+    rows = list_previews(conn)
+    reap(conn, rows)
+    return [
+        str(row["slug"]) for row in rows if _matches(row, Path(str(row["path"])))
+    ]
 
 
 def reap(conn: Connection, rows: list[Any]) -> list[str]:

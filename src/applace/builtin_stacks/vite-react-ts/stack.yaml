@@ -14,6 +14,11 @@ commands:
 manifest: package.json
 dist: dist
 env_prefix: VITE_
+# This stack's dev server proxies this path to Applace's gateway (D24), so an
+# app can fetch a relative URL in development and in production alike and never
+# hold a credential. A stack that omits it simply has no gateway, and Applace
+# says so rather than assuming one.
+gateway: /api/gateway
 entry: src/App.tsx
 deploy:
   - local

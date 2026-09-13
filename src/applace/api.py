@@ -41,6 +41,7 @@ from typing import Any, Callable, Iterator, ParamSpec
 
 from . import apps, deploy, env, gate, github, machine, panel, policy, skill
 from . import stackstore, sync, vercel
+from .apis import ApiError
 from .apps import AppError, AppExists
 from .db import Connection, connect
 from .db import list_apps as db_list_apps
@@ -69,6 +70,7 @@ CODES: tuple[tuple[type[Exception], str], ...] = (
     (AppError, "unknown-app"),
     (InvalidName, "invalid-name"),
     (EnvError, "invalid-name"),
+    (ApiError, "invalid-api"),
     (StackInstallError, "stack-install-failed"),
     (StackError, "unknown-stack"),
     (PreviewError, "preview-failed"),
@@ -256,6 +258,61 @@ class Applace:
                     self.paths, conn, app, name=name, description=description
                 ),
             }
+
+    @answered
+    def declare_api(
+        self,
+        app: str,
+        name: str,
+        base_url: str,
+        token_env: str | None = None,
+        paths: list[str] | None = None,
+        methods: list[str] | None = None,
+        header: str | None = None,
+        scheme: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an upstream the app may call, and get the path to fetch (D24).
+
+        The credential never reaches the browser, so the app's code cannot call
+        a company API directly: it fetches `/api/gateway/<name>/...` and Applace
+        adds the token server-side -- in preview from a process it runs, in
+        production from a serverless function it writes into the app's own
+        repository on the next write.
+
+        `token_env` is the **name** of the variable holding the credential, not
+        the credential (D8). `paths` and `methods` are the allowlist: anything
+        outside them is refused by the gateway, not by convention.
+        """
+        with self._session() as conn:
+            return {
+                "ok": True,
+                **apps.declare_api(
+                    self.paths,
+                    conn,
+                    app,
+                    name=name,
+                    base_url=base_url,
+                    token_env=token_env,
+                    paths=paths,
+                    methods=methods,
+                    header=header,
+                    scheme=scheme,
+                    description=description,
+                ),
+            }
+
+    @answered
+    def forget_api(self, app: str, name: str) -> dict[str, Any]:
+        """Undeclare an upstream. The generated function goes on the next write."""
+        with self._session() as conn:
+            return {"ok": True, **apps.forget_api(conn, app, name)}
+
+    @answered
+    def apis(self, app: str) -> dict[str, Any]:
+        """Every upstream this app declared, and the path its code fetches."""
+        with self._session() as conn:
+            return {"ok": True, **apps.declared_apis(conn, app)}
 
     @answered
     def preview(self, app: str) -> dict[str, Any]:

@@ -16,7 +16,7 @@ import typer
 
 from . import deploy as deployment
 from . import env as env_store
-from . import gate, policy, skill
+from . import apis, gate, gateway, policy, skill
 from .api import Applace
 from .apps import (
     AppError,
@@ -584,6 +584,8 @@ def policy_command() -> None:
     typer.echo(f"  dependencies  {rules.summary()}")
     typer.echo(f"  public repos  {rules.public_repositories}")
     typer.echo(f"  production    {rules.production_deploys}")
+    hosts = ", ".join(rules.hosts) if rules.hosts else "any host an app declares"
+    typer.echo(f"  apis          {hosts}")
 
 
 env_app = typer.Typer(
@@ -677,6 +679,92 @@ def env_remove(
     finally:
         conn.close()
     typer.echo(f"Removed {variable}" + ("" if had_value else " (it had no value)"))
+
+
+api_app = typer.Typer(
+    add_completion=False,
+    help="The upstreams an app may call, and the gateway that holds the token (D24).",
+    no_args_is_help=True,
+)
+app.add_typer(api_app, name="api")
+
+
+@api_app.command("ls")
+def api_list(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+) -> None:
+    """What this app is allowed to call, and under which path its code calls it."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        declared = apis.declarations(conn, str(row["id"]))
+        values = env_store.values_for(paths, str(row["slug"]))
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if not declared:
+        typer.echo(f"{name} declares no APIs.")
+        return
+    for api in declared:
+        typer.echo(f"  {api.name}  →  {api.base_url}")
+        typer.echo(f"    fetch    {api.mount}/…")
+        typer.echo(f"    allowed  {', '.join(api.methods)} on {', '.join(api.paths)}")
+        if api.token_env:
+            state = "set" if api.token_env in values else "MISSING"
+            typer.echo(f"    token    {api.token_env} ({state}, sent as {api.header})")
+
+
+@api_app.command("rm")
+def api_remove(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    api_name: Annotated[str, typer.Argument(help="The declared API to forget.")],
+) -> None:
+    """Stop allowing an app to call an API. Takes effect on the next request."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        row = require_app(conn, name)
+        removed = apis.forget(conn, app_id=str(row["id"]), name=api_name)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if not removed:
+        typer.echo(f"{name} did not declare {api_name}.")
+        return
+    typer.echo(f"Removed {api_name} from {name}")
+    typer.echo("  the generated function goes on the next write")
+
+
+@api_app.command("gateway")
+def api_gateway(
+    stop: Annotated[
+        bool, typer.Option("--stop", help="Stop the gateway instead of describing it.")
+    ] = False,
+) -> None:
+    """The process that holds this home's credentials, and what it has refused."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        if stop:
+            typer.echo("Gateway stopped." if gateway.stop(conn) else "Nothing running.")
+            return
+        running = gateway.status(conn)
+    finally:
+        conn.close()
+    if running is None:
+        typer.echo("No gateway running. It starts with the first preview that needs one.")
+        return
+    typer.echo(f"{running.url}  (pid {running.pid})")
+    typer.echo(f"  log  {running.log}")
+    typer.echo(f"  key  {paths.env / gateway.KEY_NAME} (0600)")
 
 
 github_app = typer.Typer(

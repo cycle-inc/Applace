@@ -36,6 +36,7 @@ commands:
 manifest: manifest.json
 dist: out
 env_prefix: TEST_
+gateway: /api/gateway
 entry: src/main.txt
 deploy:
   - local

@@ -52,7 +52,8 @@ never run `git`, and never edit files outside the app.
   that Applace did not make — that is `stage: "handover"`, and it is not a bug
   to fix. Tell the human which file you need and let them commit or discard.
 - **Never write a secret into source.** A browser bundle is public. Use
-  `set_env` (below).
+  `set_env` for configuration, and `use_api` for anything that needs a token
+  (both below).
 - **Do not touch** `node_modules/`, `dist/`, `.git/`, `package-lock.json`, or
   anything outside the app.
 
@@ -157,6 +158,50 @@ The response tells you the exact command for the human to run
 reaches the dev server and the build by itself. On this stack a variable must
 start with `VITE_` to reach the browser — `set_env` warns you when it does not.
 Read one with `import.meta.env.VITE_API_BASE_URL`.
+
+## Calling an API that needs a credential
+
+A token in front-end code is a published token: anyone who opens the page can
+read it. So an app never holds one. Declare the API instead, and Applace proxies
+the call and adds the credential server-side.
+
+```
+use_api {
+  app,
+  name: "crm",
+  base_url: "https://crm.internal/api/v2",
+  token_env: "CRM_TOKEN",
+  paths: ["customers/**"],
+  methods: ["GET"],
+}
+```
+
+Then the app's own code fetches a **relative** path, and nothing else changes:
+
+```ts
+import { viaGateway } from './lib/api'
+
+const customers = await viaGateway<Customer[]>('crm', 'customers?limit=20')
+```
+
+Four things follow from that, and they are all enforced rather than advised:
+
+- `paths` and `methods` are an allowlist. `["GET"]` on `["customers/**"]` means
+  a `DELETE`, or a call to `admin`, is refused by the proxy with a 403 your page
+  can see. **Declare the narrowest thing that works** — you can always widen it.
+- `token_env` is a **name**. The response carries `needs`: the command for the
+  human to run. Relay it. Until they do, the call comes back 503 saying the
+  credential has no value, which is a state to report, not to work around.
+- **A `fetch` to an absolute URL you did not declare is a red gate.** The write
+  is refused with `undeclared_calls` naming the file and the line. Declare it or
+  remove it; there is no third option, and hard-coding a token to get past it is
+  the one thing this whole mechanism exists to prevent.
+- It works the same in production. The declaration compiles to an ordinary
+  serverless function committed into the app's repository — a file a human can
+  read, importing nothing from Applace.
+
+`apis { app }` lists what the app may call. Use plain `api()` for a public API
+that needs no credential; the gateway is for the ones that do.
 
 ## Looking at the page
 

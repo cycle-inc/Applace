@@ -99,7 +99,9 @@ def test_the_stage_after_a_failure_is_not_run(
     paths, conn, _ = app
     _set_command(paths, "typecheck", "false")
     report = gate.write_files(paths, conn, app="gate-app", files_to_write={"a.txt": "x"})
-    assert [stage.name for stage in report.stages] == ["policy", "install", "typecheck"]
+    assert [stage.name for stage in report.stages] == [
+        "policy", "apis", "install", "typecheck"
+    ]
 
 
 def test_a_failing_stage_comes_back_with_the_tools_own_file_and_line(

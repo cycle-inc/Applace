@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import diagnostics, env, files, gitrepo, handover, policy, shell
+from . import apis, diagnostics, env, files, gitrepo, handover, policy, shell
+from .apis import Reach
 from .apps import INSTALL_TIMEOUT, require_app
 from .db import Connection, insert_gate, insert_snapshot, unpushed
 from .diagnostics import Diagnostic
@@ -72,6 +73,12 @@ class GateReport:
     deleted: list[str] = field(default_factory=list)
     new_deps: list[dict[str, str]] = field(default_factory=list)
     refused: list[Refusal] = field(default_factory=list)
+    # Absolute URLs the write tried to call directly instead of declaring (D24).
+    reached: list[Reach] = field(default_factory=list)
+    # The gateway function this gate wrote or removed, when the declarations
+    # moved. Reported because it is a file in the app's history that no agent
+    # asked for, and an unexplained commit is the thing D1 exists to avoid.
+    generated: str = ""
     commit: str | None = None
     committed: bool = False
     dirty: bool = False
@@ -99,6 +106,10 @@ class GateReport:
         }
         if self.refused:
             out["refused_deps"] = [refusal.as_dict() for refusal in self.refused]
+        if self.reached:
+            out["undeclared_calls"] = [reach.as_dict() for reach in self.reached]
+        if self.generated:
+            out["generated"] = self.generated
         if self.push is not None:
             out["github"] = self.push.as_dict()
         if self.human is not None and self.human.touched:
@@ -181,6 +192,14 @@ def write_files(
         _journal(conn, row, report, snapshot_id=None)
         return report
 
+    # D24, before the pipeline for the same reason D9 is: this is cheap, it is
+    # about what the agent just wrote, and the answer changes what gets built --
+    # the generated function has to exist before the build that bundles it.
+    if not _check_apis(paths, conn, report, row, root, stack, to_write):
+        report.dirty = gitrepo.is_dirty(root)
+        _journal(conn, row, report, snapshot_id=None)
+        return report
+
     _run_pipeline(
         report,
         root,
@@ -258,6 +277,110 @@ def _check_policy(
     else:
         report.stages.append(StageRun("policy", ok=True, duration_ms=0))
     return True
+
+
+def _check_apis(
+    paths: ApplacePaths,
+    conn: Connection,
+    report: GateReport,
+    row: Any,
+    root: Path,
+    stack: Stack,
+    written: dict[str, str],
+) -> bool:
+    """The D24 stage: no undeclared egress, and the function matches the truth.
+
+    False means the gate is red. Two different things happen here and they are
+    one stage on purpose -- both answer "does this app's outside world match
+    what was declared", and an agent fixing one usually has to see the other.
+    """
+    declared = apis.declarations(conn, str(row["id"]))
+
+    # A declaration the policy no longer allows. Checked here and not only when
+    # it was made, because a company tightens `policy.yaml` long after the app
+    # was built, and the app must stop building rather than keep shipping.
+    rules = policy.load(paths)
+    forbidden = [
+        reason
+        for api in declared
+        if (reason := rules.refuse_api(api.name, api.host))
+    ]
+    if forbidden:
+        report.stage = "apis"
+        report.errors = [
+            Diagnostic(message=f"{reason}. Undeclare it with forget_api, or ask "
+                                f"the human to allow the host in {paths.policy}.")
+            for reason in forbidden
+        ]
+        report.stages.append(StageRun("apis", ok=False, duration_ms=0))
+        return False
+
+    # The guide (D24): an absolute URL in a `fetch` is an agent that has not
+    # been told about `declare_api` yet. Red, because a call with no credential
+    # is a page that will not work, and finding that out at runtime is worse.
+    report.reached = apis.host_lint(written, declared)
+    if report.reached:
+        report.stage = "apis"
+        report.errors = [
+            Diagnostic(
+                message=(
+                    f"this app may not call {reach.host} directly. "
+                    f"{reach.hint}, so the credential stays out of the browser."
+                ),
+                file=reach.file,
+                line=reach.line,
+            )
+            for reach in report.reached
+        ]
+        report.stages.append(StageRun("apis", ok=False, duration_ms=0))
+        return False
+
+    changed = _write_function(root, stack, declared)
+    if changed:
+        report.generated = changed
+    report.stages.append(
+        StageRun(
+            "apis", ok=True, duration_ms=0,
+            skipped=not declared and not changed,
+            reason="the app declares no APIs",
+        )
+    )
+    return True
+
+
+def _write_function(root: Path, stack: Stack, declared: list[Any]) -> str:
+    """Keep the generated function in step with the declarations.
+
+    Returns the path it wrote or removed, or "" when nothing had to move. It is
+    compared before writing so an unchanged declaration does not produce a
+    commit on every gate -- a repository full of "Update the app" commits that
+    changed one generated file is a history nobody can read.
+    """
+    target = root / apis.FUNCTION_PATH
+    if not declared:
+        if target.exists():
+            target.unlink()
+            _prune(target.parent, root)
+            return apis.FUNCTION_PATH
+        return ""
+    if not stack.gateway:
+        # Refused at declaration time, so reaching here means the stack changed
+        # under an app that already had declarations. Say nothing and write
+        # nothing: the drift belongs to M8's report, not to this gate.
+        return ""
+    wanted = apis.function_source(declared)
+    if target.exists() and target.read_text(encoding="utf-8") == wanted:
+        return ""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(wanted, encoding="utf-8")
+    return apis.FUNCTION_PATH
+
+
+def _prune(directory: Path, root: Path) -> None:
+    """Remove the directories a deleted generated file leaves behind."""
+    while directory != root and directory.is_dir() and not any(directory.iterdir()):
+        directory.rmdir()
+        directory = directory.parent
 
 
 def _run_pipeline(
