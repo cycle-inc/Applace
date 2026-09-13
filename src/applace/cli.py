@@ -8,6 +8,7 @@ human debugging what an agent did should not have to use different words.
 
 from __future__ import annotations
 
+import json
 from importlib import metadata
 from pathlib import Path
 from typing import Annotated, Any
@@ -16,7 +17,7 @@ import typer
 
 from . import deploy as deployment
 from . import env as env_store
-from . import apis, apps, gate, gateway, policy, skill
+from . import apis, apps, gate, gateway, policy, register, skill
 from .api import Applace
 from .apps import (
     AppError,
@@ -53,6 +54,7 @@ from .github import token as github_token
 from .init_cmd import InitReport, run_init
 from .machine import Machine, MachineError
 from .naming import InvalidName
+from .panel import serve_machine as serve_machine_panel
 from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
 from .preview import tail as preview_tail
@@ -101,6 +103,21 @@ def _root(
 
 def _home() -> ApplacePaths:
     return applace_paths()
+
+
+# Shared by every command that can answer a machine or a script instead of a
+# person. `--json` is the export a dashboard reads; the human form above it is
+# the same data, and neither is generated from the other.
+JSON_OPTION = typer.Option(
+    "--json", help="The same answer as JSON, for a dashboard or an export."
+)
+USER_OPTION = typer.Option(
+    "--user", "-u", help="Only this person's home. The id their backend uses."
+)
+
+
+def _emit(payload: object) -> None:
+    typer.echo(json.dumps(payload, indent=2, default=str))
 
 
 def _require_home(paths: ApplacePaths) -> None:
@@ -279,19 +296,33 @@ def format_take(report: TakeReport) -> str:
 
 
 @app.command("ls")
-def list_command() -> None:
-    """The apps on this machine, and whether they are committed."""
+def list_command(
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """The apps in this home: their state, their commit and where they run.
+
+    The same fields the machine-wide `applace machine apps` shows, from the
+    same journal (D27), plus the two only a working tree can answer -- whether
+    it is dirty and which branch it is on.
+    """
     paths = _home()
     _require_home(paths)
     conn = connect(paths.db)
     try:
         rows = list_apps(conn)
+        if as_json:
+            _emit({"ok": True, "apps": [app_detail(paths, conn, row) for row in rows]})
+            return
         if not rows:
             typer.echo("No apps yet. `applace new \"My App\"` makes one.")
             return
         for row in rows:
             detail = app_detail(paths, conn, row)
-            state = (
+            # Two different facts, and a listing that showed one of them would
+            # be the wrong one half the time: `state` is what the last gate
+            # said, `tree` is what is on disk right now.
+            state = str(detail.get("state") or "new")
+            tree = (
                 "missing"
                 if detail.get("missing")
                 else ("dirty" if detail.get("dirty") else "clean")
@@ -310,7 +341,8 @@ def list_command() -> None:
             if shipped:
                 where += f"  [{shipped['environment']}] {shipped['url']}"
             typer.echo(
-                f"{str(row['slug']):<24} {str(row['stack']):<16} {state:<8} {commit}{where}"
+                f"{str(row['slug']):<24} {str(row['stack']):<16} "
+                f"{state:<6} {tree:<8} {commit}{where}"
             )
     finally:
         conn.close()
@@ -1597,6 +1629,181 @@ def machine_ports(
             + (f"pid {pid}" if pid else "starting")
         )
         typer.echo(f"  {hold['home']}")
+
+
+@machine_app.command("apps")
+def machine_apps(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+    user: Annotated[str | None, USER_OPTION] = None,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Every app on this machine, whose it is, and where it is exposed (D27).
+
+    Read from each home's journal, read-only. It opens no app's files, so it is
+    safe to run on a busy machine and fast on one with hundreds of apps.
+    """
+    found = _machine(root).apps(user=user)
+    if as_json:
+        _emit({"ok": True, "apps": found})
+        return
+    if not found:
+        typer.echo("No apps on this machine yet.")
+        return
+    for entry in found:
+        where = " ".join(
+            str(exposed["url"]) for exposed in entry["exposed"] if exposed["url"]
+        )
+        typer.echo(
+            f"{str(entry['user']):<28} {str(entry['app']):<24} "
+            f"{str(entry['stack']):<16} {str(entry['state']):<6} "
+            f"{(entry['commit'] or '-')[:12]}" + (f"  {where}" if where else "")
+        )
+        if entry["taken_from"]:
+            typer.secho(f"{'':<28} taken from {entry['taken_from']}", fg=typer.colors.YELLOW)
+
+
+@machine_app.command("audit")
+def machine_audit(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+    user: Annotated[str | None, USER_OPTION] = None,
+    since: Annotated[
+        str | None, typer.Option("--since", help="From this date or timestamp.")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option("--until", help="Up to and including this date.")
+    ] = None,
+    kind: Annotated[
+        list[str] | None,
+        typer.Option("--kind", "-k", help=f"One of {', '.join(register.KINDS)}. Repeatable."),
+    ] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="The last N events. 0 for all.")
+    ] = 50,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """What happened here that somebody may later be asked about (D27).
+
+    Apps created or taken over, every deploy with the human confirmation that
+    permitted it, every upstream an app was allowed to call, and every write a
+    policy refused. No secret's value has ever been in the journal, so none can
+    be in this export.
+    """
+    found = _machine(root)
+    try:
+        events = found.audit(
+            user=user, since=since, until=until,
+            kinds=kind or None, limit=limit or None,
+        )
+    except MachineError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if as_json:
+        _emit({"ok": True, "events": events})
+        return
+    if not events:
+        typer.echo("Nothing in that window.")
+        return
+    for event in events:
+        typer.echo(
+            f"{str(event['at'])[:19]}  {str(event['kind']):<8} "
+            f"{str(event['app']):<24} {event['user']}"
+        )
+        typer.echo(f"  {_audit_line(event)}")
+
+
+def _audit_line(event: dict[str, Any]) -> str:
+    """The one line that says what actually happened, per kind."""
+    kind = str(event["kind"])
+    if kind == "deploy":
+        said = "confirmed by a human" if event.get("confirmed") else "not confirmed"
+        return (
+            f"{event['target']} {event['environment']} — {event['status']}"
+            f" — {str(event['commit'])[:12]} — {said}"
+            + (f" — {event['url']}" if event.get("url") else "")
+        )
+    if kind == "api":
+        methods = ", ".join(event.get("methods") or []) or "any method"
+        return (
+            f"{event['name']} → {event['base_url']} ({methods}; "
+            f"credential from ${event['token_env']})"
+        )
+    if kind == "refused":
+        return f"{event['stage']}: " + "; ".join(event.get("why") or [])
+    if kind == "take":
+        return f"adopted from {event['from']} as a {event['stack']} app"
+    return f"created from the {event['stack']} stack"
+
+
+@machine_app.command("spend")
+def machine_spend(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+    user: Annotated[str | None, USER_OPTION] = None,
+    hours: Annotated[
+        float, typer.Option("--hours", help="The window the limits are counted over.")
+    ] = 1.0,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """What each home has used: the rate window, and the journal's total (D27).
+
+    The two are different questions. The window is what the limits refuse
+    against and is forgotten after a week; the total goes back to the day each
+    app was created.
+    """
+    report = _machine(root).spend(user=user, hours=hours)
+    if as_json:
+        _emit(report)
+        return
+    limits = report["limits"]
+    for home in report["users"]:
+        window, total = home["window"], home["total"]
+        typer.echo(
+            f"{home['user']}  {total['writes']} writes "
+            f"({total['red']} red), {total['deploys']} deploys "
+            f"({total['production_deploys']} to production), "
+            f"{total['build_seconds']}s building, {home['disk_mb']} MB"
+        )
+        typer.echo(
+            f"  last {report['window_hours']}h: "
+            + ", ".join(
+                f"{act} {window[act]}"
+                + (f"/{limits[field]}" if limits.get(field) is not None else "")
+                for act, field in (
+                    ("write", "writes_per_hour"),
+                    ("deploy", "deploys_per_hour"),
+                    ("shot", "shots_per_hour"),
+                )
+            )
+        )
+        for app in home["apps"]:
+            typer.echo(
+                f"    {str(app['app']):<24} {app['writes']} writes, "
+                f"{app['red']} red, {app['deploys']} deploys"
+            )
+    if not report["users"]:
+        typer.echo("No homes here yet.")
+
+
+@machine_app.command("panel")
+def machine_panel(
+    root: Annotated[Path | None, ROOT_OPTION] = None,
+    port: Annotated[int, typer.Option("--port", help="The port to serve on.")] = 8850,
+    host: Annotated[
+        str, typer.Option("--host", help="Interface to bind. Loopback by default.")
+    ] = "127.0.0.1",
+) -> None:
+    """Browse every home's apps in a browser: the M10 panel, one level up (D27).
+
+    Read-only, and it authenticates nobody -- which is why it binds loopback.
+    A company's own backend mounts `panel.machine_routes(machine, visible=...)`
+    inside its own authentication instead.
+    """
+    found = _machine(root)
+    typer.echo(f"Panel  http://{host}:{port}/panel")
+    typer.secho(
+        "This view spans every home and checks no identity. Keep it on loopback.",
+        fg=typer.colors.YELLOW,
+    )
+    serve_machine_panel(found, port=port, host=host)
 
 
 @machine_app.command("gc")

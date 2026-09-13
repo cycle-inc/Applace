@@ -9,13 +9,15 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M15 are shipped** — the whole harness a developer drives, the
+> **Status: M1 to M16 are shipped** — the whole harness a developer drives, the
 > panel that puts it inside a chat window, which is where a company's users
 > actually are, the gateway that lets an app read the company's own APIs without
 > a credential ever reaching the browser, a gate that ends in a real browser
-> so a green build that paints a white screen is a red write, and a way in for
-> the front ends a company already has: `take` adopts a repository as it stands,
-> writing nothing into it.
+> so a green build that paints a white screen is a red write, a way in for
+> the front ends a company already has (`take` adopts a repository as it stands,
+> writing nothing into it), and the register: the person who runs the machine
+> can see every home's apps, every deploy and what it all cost, through journals
+> opened read-only.
 
 ## What v1 is
 
@@ -861,32 +863,85 @@ And **an adoption is a report before it is a verdict** — the command's whole j
 is to say what it found, which is why every refusal names what was looked for
 rather than what was missing.
 
-**M16 — The register.** Per D27 — the developer's view, one level above a home.
+**M16 — The register.** *Shipped.* Per D27 — the developer's view, one level
+above a home. It lives in `register.py`, whose three rules are the milestone:
+every database opened read-only, nothing that touches an app's files, and one
+definition of the state used by every view.
 
 1. **Across the homes.** `Machine.apps()` — every app of every home with its
    owner, state, stack, last gate and where it is exposed; `Machine.audit()` —
-   the journal rows that govern (what became public, what reached production,
-   which human confirmed it, what a policy refused), filterable by date and by
-   user; `Machine.spend()` — what M12's ledger already counts, per home and per
-   app. Every home's database is opened read-only: a reporting tool that can
-   write is a reporting tool that can corrupt.
-2. **One home's listing, agreeing with it.** `ap.apps()` and `ap.cards()` gain
-   the fields the register shows, so the two views never disagree about the
-   state of the same app.
-3. **The panel at the root.** The M10 routes mounted for a `Machine`: an index
-   of homes and apps, each card reachable by `(user, slug)`, read-only (D16),
-   authenticating nobody — the backend that mounts it passes a callable saying
-   who may see what, and a home that callable refuses is a 404, not a 403.
+   the journal rows that govern, newest first, filterable by `user`, `since`,
+   `until`, `kinds` and `limit`; `Machine.spend()` — per home and per app. Every
+   home's database is opened read-only (`mode=ro` on the handle and `query_only`
+   on the connection): a reporting tool that can write is a reporting tool that
+   can corrupt, and it would be doing it to somebody else's data at the moment
+   nobody is looking. Nothing in the module shells out or walks a directory, so
+   the listing is SQL on a machine with four hundred apps and cannot take the
+   index lock of a checkout somebody is working in. The five audit kinds are
+   `create`, `take`, `deploy`, `api` and `refused`.
+2. **One home's listing, agreeing with it.** The journal half of `app_summary`
+   *is* `register.summarise`, and `state_of` is the only place `new`, `green`
+   and `red` are decided. `ap.apps()` adds `dirty` and `branch` — the questions
+   only the working tree can answer, asked by the home that owns it — and the
+   chat card takes the state rather than recomputing it, so the machine, the
+   home and the card cannot disagree about the same app.
+3. **The panel at the root.** `panel.machine_routes(machine, visible=...)`: an
+   index of homes and apps, every M10 card reachable at
+   `/panel/users/{key}/apps/{slug}`, read-only (D16) and authenticating nobody.
+   The key is `folder(user)`, not the raw id, because an id is an email, a UUID
+   or a display name with a slash in it and a URL carries none of those;
+   `/panel/users` hands out both. A home the callable refuses answers **404, not
+   403**, byte-identical to a person who does not exist: a 403 confirms the
+   person, and on a machine whose directory names come from email addresses that
+   is a staff directory for anyone who can guess. `applace machine panel` serves
+   it on loopback with a warning saying exactly that.
 4. **The CLI.** `applace machine apps|audit|spend`, each with `--user` to narrow
-   and `--json` to feed a dashboard or hand a security team an export.
+   and `--json` to feed a dashboard or hand a security team an export; `audit`
+   adds `--since`, `--until`, `--kind` and `--limit`; `spend` adds `--hours`.
+   `applace ls` gained `--json` and now prints the state and the working tree as
+   two separate columns.
 
 Out of scope: alerting, retention policy, and any metrics backend. The register
 answers questions; it does not decide that somebody should be woken up.
 
-*Acceptance:* `scripts/m16_acceptance.sh` — three homes holding apps in
-different states; `machine apps` lists every one against the right owner while
-opening no app's files and taking no write lock; `audit` contains the production
-deploy and the human confirmation that permitted it and contains no secret's
-value; `spend` agrees with the ledger to the unit; the root panel lists the
-homes the callable allows and 404s the one it does not; and `--json` parses on
-all three.
+*Acceptance:* `scripts/m16_acceptance.sh` — three homes built at once under one
+root: one green and deployed to production by a human with an upstream declared
+and a real credential set, one red because a policy refused the dependency the
+agent added, and one holding a repository adopted from outside the home
+entirely. `machine apps` lists all three against the right owner with `git`,
+`npm` and `node` replaced on `PATH` by scripts that record being called and
+exit — none of them is. It reads alice's home while her own connection holds
+`BEGIN IMMEDIATE` and answers in milliseconds, and a `DELETE` through the
+register's handle raises `attempt to write a readonly database`. The audit holds
+the production deploy with `confirmed`, the upstream with the *name* of its
+variable, the policy refusal naming `left-pad`, the take-over with where it came
+from — and the credential's value, which is really on disk at `0600`, appears in
+none of the answers. `spend` matches the ledger to the unit for every home and
+every act. The panel lists the two homes the callable allows, 404s the third
+byte-identically to an invented one, and serves a card whose state agrees with
+the register. Every command parses as JSON, and `applace ls --json` in one home
+agrees with `applace machine apps` about the same app. No model is called.
+
+What M16 learned. **Read-only had to be made true, not asserted.** SQLite was
+told twice and then tested: `mode=ro` reads a WAL database while its owner holds
+the write lock and raises on a write, which is the only reason this module is
+allowed to point at other people's data at all. **The rule "touch no app's
+files" collided with the listing that already existed** — `app_summary` shelled
+out to git for `dirty` and `branch` — and the fix was not to drop the fields but
+to split the answer: SQL in the register, the working tree from the home that
+owns it. The acceptance proves it the only honest way, by making `git`
+unrunnable and running the register anyway. **One definition or none.** Three
+views computing "is this app red" from `errors` and `commit` in three places
+were three views that would eventually disagree; `state_of` is now the single
+function all of them call, and the test that matters asserts the three answers
+are equal rather than asserting each one. **A page that stats four hundred
+thousand files to draw a heading is a page nobody opens twice**: `Machine.users()`
+walks every home for `disk_mb`, so the index needed the cheap half,
+`Machine.homes()`, which reads the ledger and counts nothing. **The window and
+the total are two numbers, never one.** The machine ledger keeps a rolling week
+because that is all a rate limit needs; the journal keeps every gate forever.
+Adding them would give a figure that is sometimes a week and sometimes a year.
+And **what is absent from the audit is a decision too**: a production deploy
+refused by policy raises before a row exists, so what proves the rule held is
+the missing deploy plus the gate's own recorded refusals — the audit reports
+what happened, and does not invent rows for what did not.

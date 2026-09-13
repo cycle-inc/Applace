@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from . import register
 from .db import now_iso
 from .paths import ApplacePaths
 
@@ -444,6 +445,28 @@ class Machine:
                 conn.close()
         return applace
 
+    def homes(self) -> list[dict[str, Any]]:
+        """Everyone with a home here, and where it is. Counts nothing.
+
+        The cheap half of `users()`: one query against the ledger, no walk of
+        anybody's disk. Every listing that is about the apps rather than about
+        the quota reads this, because a page that stats four hundred thousand
+        files of node_modules to draw a heading is a page nobody opens twice.
+        """
+        conn = connect(self.ledger)
+        try:
+            rows = list(conn.execute("SELECT * FROM users ORDER BY created_at"))
+        finally:
+            conn.close()
+        return [
+            {
+                "user": str(row["id"]),
+                "home": str(row["home"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
     def users(self) -> list[dict[str, Any]]:
         """Everyone with a home here, and how much of it they are using."""
         conn = connect(self.ledger)
@@ -479,6 +502,143 @@ class Machine:
     def ports(self) -> list[dict[str, Any]]:
         """Who holds which port, across every home (D21)."""
         return held(self.ledger)
+
+    # -- the register (D27) ------------------------------------------------
+    #
+    # Three questions a person who runs the machine has and nobody living in a
+    # home can answer: what is here, what was allowed to happen, and what it
+    # cost. All three read every journal read-only and open nobody's files.
+
+    def apps(self, *, user: str | None = None) -> list[dict[str, Any]]:
+        """Every app of every home, with whose it is.
+
+        No `git`, no `stat`, no directory walk: on a machine with four hundred
+        apps a listing that shells out once per app is a listing nobody runs
+        twice, and one that runs git inside a checkout somebody is working in
+        can take their index lock. `dirty` is a question for the home that owns
+        the app; this answers what the journal knows.
+        """
+        found: list[dict[str, Any]] = []
+        for who, paths in self._homes(user):
+            found.extend(
+                {"user": who, "home": str(paths.home), **entry}
+                for entry in self._read(paths, register.apps)
+            )
+        found.sort(key=lambda entry: (str(entry["user"]), str(entry["app"])))
+        return found
+
+    def audit(
+        self,
+        *,
+        user: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        kinds: Iterable[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """What happened here that somebody may later be asked about (D27).
+
+        Newest first, because the question is nearly always "what has just
+        happened on this machine" and the answer to "what happened in March" is
+        `--since` away. `limit` is applied after the sort, so it is the last N
+        events rather than the last N of whichever home was read first.
+        """
+        wanted = tuple(kinds) if kinds is not None else register.KINDS
+        unknown = sorted(set(wanted) - set(register.KINDS))
+        if unknown:
+            raise MachineError(
+                f"unknown audit kind {', '.join(unknown)}. "
+                f"Known kinds are {', '.join(register.KINDS)}."
+            )
+        events: list[dict[str, Any]] = []
+        for who, paths in self._homes(user):
+            events.extend(
+                {"user": who, **entry}
+                for entry in self._read(
+                    paths,
+                    lambda conn: register.audit(
+                        conn, since=since, until=until, kinds=wanted
+                    ),
+                )
+            )
+        events.sort(key=lambda entry: (str(entry["at"]), str(entry["user"])), reverse=True)
+        return events[:limit] if limit else events
+
+    def spend(
+        self, *, user: str | None = None, hours: float = 1.0
+    ) -> dict[str, Any]:
+        """What each home has used, from both places that count it.
+
+        ``window`` is the ledger's rolling count -- the one the limits are
+        enforced against, kept for a week and no longer (D22). ``total`` is the
+        journal's, which goes back to the day the app was created. They are
+        reported side by side rather than added, because a number that is
+        sometimes a week and sometimes a year is not a number.
+        """
+        seconds = hours * 3600.0
+        limits = self.limits
+        homes: list[dict[str, Any]] = []
+        for who, paths in self._homes(user):
+            per_app = self._read(paths, register.spend)
+            homes.append({
+                "user": who,
+                "home": str(paths.home),
+                "window": {
+                    act: spent(paths, act, seconds=seconds)
+                    for act in ("write", "deploy", "shot")
+                },
+                "total": {
+                    "writes": sum(int(app["writes"]) for app in per_app),
+                    "green": sum(int(app["green"]) for app in per_app),
+                    "red": sum(int(app["red"]) for app in per_app),
+                    "deploys": sum(int(app["deploys"]) for app in per_app),
+                    "production_deploys": sum(
+                        int(app["production_deploys"]) for app in per_app
+                    ),
+                    "build_seconds": round(
+                        sum(float(app["build_seconds"]) for app in per_app), 1
+                    ),
+                },
+                "apps": per_app,
+                "disk_mb": disk_mb(paths.home),
+            })
+        return {
+            "ok": True,
+            "window_hours": hours,
+            "limits": limits.as_dict(),
+            "users": homes,
+            "total": {
+                key: sum(int(home["total"][key]) for home in homes)
+                for key in ("writes", "green", "red", "deploys", "production_deploys")
+            },
+        }
+
+    def _homes(self, user: str | None) -> list[tuple[str, ApplacePaths]]:
+        """The homes a register call is about, in the order people arrived."""
+        if user is not None:
+            paths = self.home_of(user)
+            return [(user, paths)] if paths.db.exists() else []
+        return [
+            (str(record["user"]), ApplacePaths(Path(str(record["home"])), ledger=self.ledger))
+            for record in self.homes()
+        ]
+
+    def _read(
+        self, paths: ApplacePaths, question: Callable[[sqlite3.Connection], Any]
+    ) -> Any:
+        """Ask one home's journal something, read-only, and let go of it.
+
+        A home with no database yet is not an error: `Machine.user()` creates
+        the row in the ledger before anything in the home is written, so a
+        person who has connected and built nothing is a home with no journal.
+        """
+        if not paths.db.exists():
+            return []
+        conn = register.open_ro(paths.db)
+        try:
+            return question(conn)
+        finally:
+            conn.close()
 
     def gc(
         self, *, preview_hours: float = 2.0, scratch_hours: float = 24.0

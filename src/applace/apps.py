@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from . import apis, deploy, env, eyes, gateway, github, gitrepo, handover, policy
-from . import preview, sensor, shell
-from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
+from . import preview, register, sensor, shell
+from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
 from .github import GitHubError
@@ -220,29 +220,21 @@ def require_app(conn: Connection, key: str) -> Any:
 
 
 def app_summary(conn: Connection, row: Any) -> dict[str, Any]:
-    """What `list_apps` says about one app: state, not content."""
+    """What `list_apps` says about one app: state, not content.
+
+    The journal half of this answer is the register's (D27), so that one home's
+    listing and the machine-wide one cannot disagree about the state of the same
+    app. What is added here is what only a working tree can answer.
+    """
     path = Path(str(row["path"]))
     present = path.is_dir()
-    snapshot = latest_snapshot(conn, str(row["id"]))
-    summary: dict[str, Any] = {
-        "app": str(row["slug"]),
-        "name": str(row["name"]),
-        "description": row["description"],
-        "stack": str(row["stack"]),
-        "path": str(path),
-        "created_at": str(row["created_at"]),
-        "github_url": row["github_url"],
-        "commit": snapshot["commit_sha"] if snapshot is not None else None,
-        # Where an app came from when Applace did not make it (D26). None is the
-        # usual answer; a value means the file tree is somebody else's and the
-        # stack's template is a description of it at best.
-        "taken_from": row["taken_from"],
-    }
+    summary: dict[str, Any] = register.summarise(conn, row)
     if not present:
         # The row outlived the directory. Say so plainly rather than raising:
         # `list_apps` failing wholesale because one app was deleted by hand
         # would be a poor trade.
         summary["missing"] = True
+        summary["state"] = "missing"
         return summary
     summary["dirty"] = gitrepo.is_dirty(path)
     summary["branch"] = gitrepo.current_branch(path)

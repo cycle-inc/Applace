@@ -27,7 +27,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M15 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M16 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -49,8 +49,11 @@ through a proxy that holds the credential, in preview from a process Applace
 runs and in production from a serverless function committed to your repository,
 so nothing a browser downloads ever holds a token), the sensor (the gate
 ends in a browser: every declared route is opened, and a white screen under a
-green build is a red write), and the take-over (`applace take` makes a front end
-that already exists into an app without writing a single byte into it).
+green build is a red write), the take-over (`applace take` makes a front end
+that already exists into an app without writing a single byte into it), and the
+register (the developer who runs the machine sees every home's apps, every
+deploy with the human who confirmed it and what it all cost, through journals
+opened read-only and without opening a single app's files).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -474,6 +477,63 @@ uv run applace machine users --root /srv/applace
 uv run applace machine ports --root /srv/applace
 uv run applace machine gc    --root /srv/applace --preview-hours 2
 ```
+
+### Seeing what is on the machine
+
+Everything above is one person's view. The developer who runs the machine has
+the other one (D27): what exists here, whose it is, what was allowed to happen,
+and what it cost — across every home at once.
+
+```bash
+uv run applace ls --json                                   # one home, in detail
+uv run applace machine apps  --root /srv/applace           # every home's apps
+uv run applace machine audit --root /srv/applace --since 2026-09-01
+uv run applace machine spend --root /srv/applace --hours 24
+uv run applace machine panel --root /srv/applace           # and in a browser
+```
+
+```
+alice@example.com   sales-board   vite-react-ts  green  9f3c1a8d2b04  http://127.0.0.1:5287/
+bob@example.com     ops-notes     vite-react-ts  red    4b1e07c5aa19
+carol@example.com   legacy-board  vite-react-ts  green  7d2f9c4e1103
+                    taken from /srv/teams/legacy-board
+```
+
+Every journal is opened **read-only**, and none of this opens an app's files —
+no `git`, no `stat`, no walk of a `node_modules`. It is safe to run while people
+are working and it stays fast on a machine holding hundreds of apps. `ls` in a
+home and `machine apps` share one definition of `green`, `red` and `new`, so the
+two views cannot disagree about the same app.
+
+`audit` is the one an auditor asks for: apps created or taken over, every deploy
+with the human confirmation that permitted it (D6), every upstream an app was
+allowed to call, and every write a policy refused. No secret's value has ever
+been in a journal, so none can be in the export. `spend` reports two numbers
+side by side rather than adding them — the ledger's rolling window, which is
+what the limits refuse against and is forgotten after a week, and the journal's
+total, which goes back to the day each app was created.
+
+`machine panel` is the M10 chat card mounted one level up: an index of homes,
+and every home's apps in a browser. It binds loopback because it authenticates
+nobody. In production your own backend mounts it inside the authentication it
+already has, and says who may see whose work:
+
+```python
+from applace import Machine, panel
+
+machine = Machine("/srv/applace")
+
+def visible(request, user):                 # your session, your rules
+    return request.user.is_staff or request.user.id == user
+
+routes = panel.machine_routes(machine, visible=visible)   # mount in your app
+```
+
+A home the callable refuses answers **404, not 403**: a 403 confirms the person
+exists, and on a machine whose directory names come from email addresses that is
+a staff directory for anyone who can guess. The same three answers are on the
+class — `machine.apps()`, `machine.audit()`, `machine.spend()` — and every CLI
+command above takes `--json` and `--user`.
 
 ### Inside your own chatbot
 
