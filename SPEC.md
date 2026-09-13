@@ -81,6 +81,9 @@ Three things, and they are the whole product:
 | **D25** | **The gate ends in the browser.** Compiling is not working. After the production build, Applace serves the built bundle and visits every declared route in the headless browser it already has (D5); a route that throws, paints nothing or logs a console error is a red gate carrying the message the browser gave. This is the behavioural category: maintainability has linters and architecture has fitness functions, and this one has had nothing, which is why "green" has never been quite trustworthy. Red still means accepted and not committed (D4). Routes are declared, never crawled — a crawler makes the gate's cost a function of the app's size, and the gate runs on every write. |
 | **D26** | **Adoption adds a row, not a file.** A company has front ends already, and the way in cannot be "rewrite it here". `take` points Applace at a repository that exists: the stack is recognised from its manifest, the app is recorded, and from that moment it has a journal, a gate, previews and deploys like any other. Nothing is written *into* the tree — no config key, no marker, no Applace import — because D1 says an app must not be able to tell that Applace exists, and an adopted app is the case that proves it. An adoption that cannot pass the path lint is refused rather than repaired. |
 | **D27** | **The register is a read, and it belongs to the developer.** Whoever mounts Applace under a chatbot has to answer "what exists, who owns it, what is exposed, what did it cost" without opening an app or a shell. That is the developer's half (D19): methods and a panel, never an MCP tool, because an agent that could enumerate other people's homes is the one leak D20 exists to prevent. One home's listing has existed since M1; the root's is `Machine.apps|audit|spend`, reading every home's journal and no app's files. It is read-only (D16), it aggregates and never mutates, and it authenticates nobody — the backend that mounts it decides who may look. |
+| **D28** | **An app calls an API as the person using it, and Applace never learns who that is.** One credential per app (D24) answers "may this app call billing". It cannot answer "may *this* accountant see *this* client's invoices", and a company whose data is partitioned by customer cannot ship an app whose token sees every partition. So a declaration may instead be **on behalf of** the caller: no `token_env`, and an **exchange endpoint** the company hosts in its place. Each call carries an assertion the app's own door put there; the gateway hands it to the exchange along with the secret that authenticates Applace to it (D8 — a variable *name*), and gets back a short-lived token for that person and nobody else. The exchange is an HTTP endpoint and not a Python hook because the same declaration has to compile into the serverless function D24 commits into the repository, and that file imports nothing (D1): one mechanism, not two that must be kept in step. Three rules make it safe. **The subject is never an argument** — in production it is whatever the runtime asserted, and in preview it is the home's own user id (D20), marked as asserted by Applace so the company's endpoint may refuse that mode; an agent that could name a subject could read that person's data. **There is no fallback** — an on-behalf-of API called with no assertion is a 401, never the app's own token, because a silent downgrade is how every partition leak of this shape happens. **Nothing is kept** — assertions and exchanged tokens live in memory for the lifetime the exchange gave them, never in the journal, never on disk; the audit records the declaration, not the traffic (D27), because a journal that holds every proxied call is a request log with somebody's customers in it. |
+| **D29** | **Sharing is a read and a copy, never a second writer.** One person builds the thing their whole team needs, and one home per person (D20) has no answer for that. It gets two answers, and deliberately not a third. A shared app can be **used** — its URL and its card, read-only, which is what D16 and D27 already serve — and it can be **copied**, which clones it at a commit into the recipient's own home, where it becomes their app with `forked_from` set, the mirror of D26's `taken_from`. What it can never be is writable from two homes: two agents editing one tree is a merge Applace has no answer to, and an app writable from two places turns D20's isolation back into a `WHERE` clause everyone has to remember. Who may see what is asserted by the caller, as identity always is here (D11): a share names an audience — a person, or a group the backend says this user is in — and Applace records the grant, enforces it, and decides none of it. A grant is revocable and a copy is not; that is the honest description of what copying somebody's code does, and the UI says it rather than hiding it. |
+| **D30** | **A deploy is an artefact and a door, and the door is not Applace's.** The two targets that exist assume the internet: this machine, or Vercel through the app's repository (D12). A company whose apps read its customers' financial records will host them itself, and an app it serves still has to know who opened it — D11 says Applace authenticates nobody, and an app with no door in front of it is a public page with a gateway attached. So a third target produces a **bundle**: the tree built from a green commit, the gateway function D24 already generates, and a manifest naming the routes, the APIs, the variables that must be set and whether the app requires an identity (D28) — immutable, digested, named by the commit it came from, and handed to the company's own runtime. Nothing is uploaded anywhere Applace chose, which is the same principle as D12 read for a company that owns its hosting. The door stays the runtime's; Applace's whole job is to make an app that needs one unable to work without it, so a bundle whose APIs are delegated refuses at the function when no assertion arrives — "nobody wired up the authentication" is a 401 in front of every call instead of a quiet leak. Production is still a human's word (D6), and a rollback is an earlier artefact, because each one is immutable and each one is a commit. D14 is untouched: the app still has no runtime of its own. |
 
 ## Directory layout (user machine)
 
@@ -209,6 +212,13 @@ writes nothing, D16); mobile and React Native; a database or server runtime for
 generated apps (D14); authentication *inside* generated apps beyond what a company
 stack provides; billing; real-time collaboration; any deploy target other than the
 two named in M7.
+
+Some of those were reopened later, deliberately and one at a time, and each one
+is a decision rather than a drift: many homes under a root (D20, v2), a third
+deploy target that a company hosts itself (D30, v4), and sharing that is a read
+and a copy but still never a second writer (D29, v4). Real-time collaboration,
+a runtime of the app's own (D14) and a door of Applace's own (D11) are still
+out, and v4 says why each has to stay out.
 
 ## Milestones (strictly in order; each ends with passing tests and an acceptance script)
 
@@ -945,3 +955,136 @@ And **what is absent from the audit is a decision too**: a production deploy
 refused by policy raises before a row exists, so what proves the rule held is
 the missing deploy plus the gate's own recorded refusals — the audit reports
 what happened, and does not invent rows for what did not.
+
+### v4 — the engine a company can put its own users on
+
+v1 to v3 make one developer, and then one company's developer, able to build and
+ship apps. v4 is what the *users* of that company need before the apps are
+allowed near real data: a call that is made as the person making it, a way for
+one person's app to become the team's, and somewhere to run it that is not the
+public internet. Nothing here adds a runtime to the app (D14) or an
+authentication to Applace (D11) — both would be the wrong answer to a real
+question, and the milestones below are what the right answer costs.
+
+**M17 — The delegated call.** Per D28 — the app calls the API as whoever is
+using it.
+
+1. **The declaration.** `declare_api(app, name, base_url, on_behalf_of={...})`,
+   mutually exclusive with `token_env`: an app's upstream is either a machine
+   credential or a person's, and an API that could be both is an API that will
+   silently be the wrong one. `on_behalf_of` names the **exchange** — its URL,
+   the `secret_env` holding the credential that authenticates Applace to it, and
+   the request header the assertion arrives in (default `Authorization`). The
+   allowlist of paths and methods (D24) applies unchanged, and `apis()` reports
+   which upstreams are delegated so an agent can see it without a value.
+2. **The exchange, one shape in both places.** A POST of
+   `{app, api, assertion | subject, asserted_by}` to the endpoint, authenticated
+   by the secret, answered with `{token, expires_in}` or a refusal that is
+   passed through as a refusal. In production `assertion` is what the runtime
+   put on the request and `asserted_by` is `"runtime"`; in preview there is no
+   session, so it is `subject` — the home's own user id — and
+   `asserted_by: "applace"`, which the company's endpoint may refuse outright.
+   Which means **a home has to know whose it is**: today only the root ledger
+   does (D20), so the home records its user id when `Machine.user()` creates it,
+   and nothing else may set it.
+3. **The preview gateway.** A cache keyed by `(slug, api, subject)` honouring
+   the `expires_in` it was given, in memory and never on disk; a 401 with a
+   readable sentence when an on-behalf-of API is called with no assertion; the
+   assertion stripped from what goes upstream, exactly as the home key already
+   is; and nothing new in any log line, because `log_message` already drops the
+   query string for this reason.
+4. **The generated function, in step.** The same branch in the JavaScript D24
+   commits into the repository: module-scope cache, the exchange secret read
+   from the environment the way the static token already is, and no import. The
+   file stays readable by a person who has never heard of Applace.
+5. **What the model is told.** `SKILL.md` gains one paragraph: the app fetches a
+   relative path and the identity is the page's; an app that builds its own
+   `Authorization` header for a delegated API is doing the one thing this
+   milestone exists to prevent, and the gate says so.
+
+Out of scope: Applace implementing OAuth, OIDC, SAML, a session or a token
+format. The exchange is an endpoint the company already needs; Applace calls it.
+
+*Acceptance:* `scripts/m17_acceptance.sh` — a fake exchange that returns a
+different token per subject and a fake upstream that echoes the token it was
+given. Two homes preview the same app and the upstream sees two different
+tokens, neither of which is in either journal. A call with no assertion is a 401
+carrying what is missing, and never the other home's token. A second call inside
+`expires_in` does not reach the exchange, and one after it does. The exchange
+secret and every exchanged token are absent from the journal, the audit, the
+gateway's log and the bundle. The generated function is run under node against
+the same two fakes and behaves identically to the preview gateway, which is the
+only way "one mechanism" is a fact. No model is called.
+
+**M18 — The catalogue.** Per D29 — one person's app becomes the team's.
+
+1. **The grant.** `ap.share(app, with_="group:cabinet-42", can="use"|"copy")`,
+   `ap.unshare(app, with_=...)`, `ap.shared(app)`. An audience is `user:<id>` or
+   `group:<name>`, both opaque to Applace. Sharing is the owner's act and needs
+   no confirmation; sharing an app that is deployed is what makes its URL
+   findable, which is the reason a person does it.
+2. **The catalogue.** `Machine.catalogue(user, groups=[...])` — every app this
+   person may see and what they may do with it, built from the register's
+   machinery (D27): journals opened read-only, no app's files touched. The
+   groups are asserted by the caller, as the user id always has been (D20).
+3. **The copy.** `ap.copy("user:alice@example.com/sales-board", name=...)` —
+   a clone at the source's last green commit into the caller's own home, a new
+   slug, `forked_from` recorded beside D26's `taken_from`, its own remote under
+   D2, its own secrets set by its own human (D8: nothing is copied from the
+   source's `env/`). Quotas apply (D22). The source is never opened for writing
+   and never learns of the copy beyond one audit row.
+4. **The panel.** A catalogue page beside the register's index; a shared app's
+   card is read-only and says whose it is; `visible` (D27) still decides who may
+   reach the route, and a grant the caller is not in the audience of is the same
+   404 as a home that does not exist.
+5. **The audit.** `share`, `unshare` and `copy` join D27's kinds, because "who
+   gave whom access to what, and when" is exactly the question that milestone
+   exists to answer.
+
+Out of scope: roles, an approval workflow, a marketplace, and any notion of a
+group Applace maintains itself.
+
+*Acceptance:* `scripts/m18_acceptance.sh` — three homes and one group. An app
+shared with the group is in the other two catalogues and in nobody else's. A
+copy is a separate repository with its own history and its own home; a write to
+it leaves the original's HEAD untouched, and the original's secrets are not in
+it. Revoking the grant removes the app from the catalogue and does not remove
+the copy. The shared card 404s for a home outside the audience, byte-identically
+to an invented one. The audit holds the share, the copy and the revocation. No
+model is called.
+
+**M19 — The bundle.** Per D30 — somewhere to run it that a company owns.
+
+1. **The artefact.** `deploy(app, target="bundle")` produces
+   `<slug>-<commit>.tar.gz` from a scratch clone of a **green commit** (D4),
+   never from the working tree: the built tree, the gateway function, and
+   `applace.bundle.json` — app, commit, stack, declared routes, each API with
+   the *name* of its variable or its exchange, `requires_identity`, and a
+   sha256 of every file. Two builds of the same commit give the same digest, or
+   the artefact is not what it claims to be.
+2. **Where it goes.** A directory or an HTTP endpoint the company configured —
+   `applace deploy connect --bundle <dest>`, the developer's half (D19). The
+   `deployments` row records the digest, so a rollback is naming an earlier one
+   and nothing has to be rebuilt.
+3. **The reference host.** `applace host <bundle> --port 8860` serves a bundle
+   the way a company's runtime is expected to: static files, the gateway
+   function's routes, and the assertion header required when
+   `requires_identity` is set. It is not a product — it is the readable
+   statement of the contract, and the thing M19's acceptance runs against.
+4. **The door is not optional.** A bundle whose APIs are delegated (D28) refuses
+   every gateway path with a 401 when no assertion arrives, so a runtime that
+   forgot the authentication serves an app that cannot read anything rather than
+   one that reads everything. Production still needs a human (D6).
+
+Out of scope: Applace running a fleet, building container images, orchestrating
+anything, and shipping a door of its own.
+
+*Acceptance:* `scripts/m19_acceptance.sh` — a real app is bundled from a green
+commit, the digest is identical across two builds, and the archive holds no
+value of any secret. Unpacked under the reference host it serves the same page
+the preview served, proven in the browser Applace already has (D25). With a
+delegated API and no assertion every gateway path is a 401 and the page still
+loads; with the assertion the fake exchange and fake upstream answer as they do
+in M17. Deploying an earlier commit and then rolling back by digest gives back
+the first page, and `machine audit` holds both deploys with their digests. No
+model is called.
