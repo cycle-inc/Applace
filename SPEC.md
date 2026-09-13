@@ -71,6 +71,10 @@ Three things, and they are the whole product:
 | **D21** | **What is shared is exactly what cannot be copied.** Two homes can have their own of everything except the things there is only one of: the machine's ports and the machine's disk. So a root holds one ledger — who holds which port, and what each home has spent — and every claim on a port goes through it in a single transaction before anything binds. Probing a port and then binding it is a race that shows up as a dev server that died for no reason; the ledger is what makes "no other app, in no other home" true. |
 | **D22** | **A limit is an answer, not a queue and not a crash.** Quotas (apps, previews, disk) and rates (writes, deploys, screenshots per window) come back the way every other refusal does — `ok: false`, a `code` of `quota` or `rate-limit`, a sentence a UI can show, and what it would take to proceed. Nothing blocks waiting for a slot: a chatbot's user asked a question, and "not right now, here is why" is a better answer than a request that hangs. The cap belongs here rather than in each integrator's loop, because the machine is what actually runs out. |
 | **D23** | **Nobody's code is garbage.** Collection stops processes, releases ports and deletes scratch — a dev server nobody has looked at for hours, a claim whose process is gone, a checkout a deploy left behind. It never deletes an app, a repository, a secret or a home. A person who comes back to an idle preview finds it stopped, which is a URL away from where they were; a person who comes back to a deleted repository has lost work, and no quota is worth that. |
+| **D24** | **A credential never reaches the browser, so the call goes through a gateway the app does not own.** An app declares the APIs it consumes — a name, a base URL, the *name* of the variable holding the credential, the paths it may call — and its own code only ever fetches a relative path. In preview, Applace serves that gateway beside the dev server; on deploy, the declaration compiles to an ordinary serverless function committed into the app's repository, with the value set on the target the way D8 already sets it. The generated function imports nothing from Applace and a human can read it, which is what keeps D1 true. The declaration is the allowlist: a call to an undeclared host is a red gate, exactly as an undeclared dependency is under D9. D14 is untouched — the app still has no database and no runtime of its own; it gains one door onto APIs that already exist. |
+| **D25** | **The gate ends in the browser.** Compiling is not working. After the production build, Applace serves the built bundle and visits every declared route in the headless browser it already has (D5); a route that throws, paints nothing or logs a console error is a red gate carrying the message the browser gave. This is the behavioural category: maintainability has linters and architecture has fitness functions, and this one has had nothing, which is why "green" has never been quite trustworthy. Red still means accepted and not committed (D4). Routes are declared, never crawled — a crawler makes the gate's cost a function of the app's size, and the gate runs on every write. |
+| **D26** | **Adoption adds a row, not a file.** A company has front ends already, and the way in cannot be "rewrite it here". `take` points Applace at a repository that exists: the stack is recognised from its manifest, the app is recorded, and from that moment it has a journal, a gate, previews and deploys like any other. Nothing is written *into* the tree — no config key, no marker, no Applace import — because D1 says an app must not be able to tell that Applace exists, and an adopted app is the case that proves it. An adoption that cannot pass the path lint is refused rather than repaired. |
+| **D27** | **The register is a read, and it belongs to the developer.** Whoever mounts Applace under a chatbot has to answer "what exists, who owns it, what is exposed, what did it cost" without opening an app or a shell. That is the developer's half (D19): methods and a panel, never an MCP tool, because an agent that could enumerate other people's homes is the one leak D20 exists to prevent. One home's listing has existed since M1; the root's is `Machine.apps|audit|spend`, reading every home's journal and no app's files. It is read-only (D16), it aggregates and never mutates, and it authenticates nobody — the backend that mounts it decides who may look. |
 
 ## Directory layout (user machine)
 
@@ -656,3 +660,121 @@ the one that can be wrong. And **the collector cannot assume a database**: a
 home registered by a person who never created anything still accumulates
 scratch, and the first `gc` skipped those homes entirely because it looked for
 `applace.db` before looking for work to do.
+
+### v3 — the engine under the chatbot
+
+M1 to M12 make an agent able to build, see, ship and share an app, and make a
+machine able to hold many people doing it at once. What they do not yet make is
+an app that touches the company's data, a gate anyone should trust without
+looking, a way in for the front ends a company already has, or an answer to
+"what is running in here". Those are the four.
+
+**M13 — The gateway.** The four deliverables of D24.
+
+1. **The declaration.** `declare_api` — a name, a base URL, the *name* of the
+   variable holding the credential, and the paths and methods the app may call.
+   It is an agent-facing method for the same reason `declare_env` is: it names
+   things and supplies nothing. It is stored in the journal and in no file of
+   the app's tree (D1). `policy.yaml` gains the hosts a company permits at all,
+   and a declaration outside them is refused the way a denied dependency is
+   (D9).
+2. **The gateway in preview.** Applace serves `/__api/<name>/*` on the preview's
+   own origin, adds the credential server-side, forwards only what was declared,
+   and journals what it refuses. Same origin, so there is no CORS question and
+   no browser ever holds a token.
+3. **The gateway in production.** The declaration compiles to one ordinary
+   serverless function, committed with the green snapshot, and the credential is
+   synchronised to the target the way M7 already synchronises environment
+   variables. The function imports nothing from Applace and reads like code a
+   company would have written, which is what keeps D1 true off the harness.
+4. **The host lint.** The path lint's sibling: a written file that fetches an
+   absolute URL whose host was never declared is a red gate naming the file, the
+   line and the host. An agent cannot reach the internet by typing a URL.
+
+Out of scope, named so it is not smuggled in: a database, a queue, server-side
+rendering, and any upstream needing more than a header — an OAuth flow on behalf
+of the end user is a later question, not a small one.
+
+*Acceptance:* `scripts/m13_acceptance.sh` — an app built by the real stack reads
+an internal API through the gateway with a token the model never saw; the token
+is in no file of the repository, in no bundle a browser downloads, in no journal
+row and in no deploy log; the deployed app makes the same call through its own
+function; a write that fetches an undeclared host is red and is not committed;
+and a declaration the policy forbids is refused with the policy's own code.
+
+**M14 — The sensor.** The behavioural half of the gate, per D25.
+
+1. **The routes.** Declared by the agent, defaulting to `/`, stored beside the
+   API declarations. Declared and never crawled: the gate runs on every write.
+2. **The visit.** After the production build, the bundle is served and each
+   route is opened in the browser M4 already drives — one browser per gate, not
+   one per route. An uncaught exception, an empty body or a console error is a
+   failure carrying the browser's own message, mapped to a file and a line
+   through the sourcemap when there is one.
+3. **The assertions.** Optional, per route, declarative: a selector that must be
+   present, a string that must appear. No test framework enters the harness
+   (D10) and none is written into the app (D1).
+4. **The switch.** On by default, turned off per stack or per policy, because an
+   app whose routes require a login cannot be visited anonymously. Off is stated
+   in `get_app` rather than silently assumed, so nobody mistakes a skipped check
+   for a passed one.
+
+*Acceptance:* `scripts/m14_acceptance.sh` — an app that typechecks, lints and
+builds green while painting a white screen is refused by the gate, with the
+console error and the route named, and is not committed; the fix makes the same
+write green and it commits; a declared selector that a later write removes turns
+the gate red; a route behind a login with checks disabled is green and says in
+`get_app` that it was not visited; and no browser is left running afterwards.
+
+**M15 — The take-over.** Per D26. `take` is the front ends that already exist;
+the older `adopt`, which points an Applace app at a GitHub repository that
+already exists (D2), keeps its name and its meaning, and the documentation
+stops letting the two be confused.
+
+1. **`ap.take(source, name=...)` and `applace take <path-or-url>`.** Clone the
+   repository or record the checkout, recognise the stack from the manifest and
+   the lockfile, refuse rather than guess when nothing matches, and keep the
+   git history exactly as it is.
+2. **Nothing is written into the tree.** The stack, the routes and the API
+   declarations live in the journal. An adopted app is the case that proves D1.
+3. **The first gate is a report, not a verdict.** A codebase that is already red
+   is adopted anyway and told so; refusing red would be refusing every real
+   codebase in the building.
+4. **`--dry-run`** says what it would recognise and changes nothing.
+
+*Acceptance:* `scripts/m15_acceptance.sh` — a front end living outside Applace,
+with commits of its own, is taken over; it appears in `apps()` with its stack
+recognised; `git log` and `git status` are byte-identical to what they were
+before, and no file was added; the gate runs on it, a preview serves it, and a
+green write lands as a commit in its own history; a directory that is not a
+recognisable front end is refused with what was looked for.
+
+**M16 — The register.** Per D27 — the developer's view, one level above a home.
+
+1. **Across the homes.** `Machine.apps()` — every app of every home with its
+   owner, state, stack, last gate and where it is exposed; `Machine.audit()` —
+   the journal rows that govern (what became public, what reached production,
+   which human confirmed it, what a policy refused), filterable by date and by
+   user; `Machine.spend()` — what M12's ledger already counts, per home and per
+   app. Every home's database is opened read-only: a reporting tool that can
+   write is a reporting tool that can corrupt.
+2. **One home's listing, agreeing with it.** `ap.apps()` and `ap.cards()` gain
+   the fields the register shows, so the two views never disagree about the
+   state of the same app.
+3. **The panel at the root.** The M10 routes mounted for a `Machine`: an index
+   of homes and apps, each card reachable by `(user, slug)`, read-only (D16),
+   authenticating nobody — the backend that mounts it passes a callable saying
+   who may see what, and a home that callable refuses is a 404, not a 403.
+4. **The CLI.** `applace machine apps|audit|spend`, each with `--user` to narrow
+   and `--json` to feed a dashboard or hand a security team an export.
+
+Out of scope: alerting, retention policy, and any metrics backend. The register
+answers questions; it does not decide that somebody should be woken up.
+
+*Acceptance:* `scripts/m16_acceptance.sh` — three homes holding apps in
+different states; `machine apps` lists every one against the right owner while
+opening no app's files and taking no write lock; `audit` contains the production
+deploy and the human confirmation that permitted it and contains no secret's
+value; `spend` agrees with the ledger to the unit; the root panel lists the
+homes the callable allows and 404s the one it does not; and `--json` parses on
+all three.
