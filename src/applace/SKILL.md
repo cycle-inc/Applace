@@ -19,14 +19,17 @@ never run `git`, and never edit files outside the app.
 4. `read_files { app, paths }` — read `entry` and anything you are about to
    change. Read before you write, always.
 5. `write_files { app, files, message }` — **this is a compiler**. It
-   type-checks, lints and builds. Green means it is committed and pushed. Red
-   means nothing was committed, your files are still on disk, and `errors`
-   holds the real tool's message with a file and a line. Fix and call again.
-6. `screenshot_app { app }` — look at the page. A build going green and a page
-   rendering are two different facts.
-7. Tell the human the preview URL and the GitHub URL — or just tell them to run
+   type-checks, lints, builds, and then opens the built pages in a real
+   browser. Green means it is committed and pushed. Red means nothing was
+   committed, your files are still on disk, and `errors` holds the real tool's
+   message with a file and a line. Fix and call again.
+6. `add_route { app, path, selector, text }` — say which pages are the app and
+   what each one must show, so step 5 checks it on every write (below).
+7. `screenshot_app { app }` — look at the page yourself when the report is not
+   enough.
+8. Tell the human the preview URL and the GitHub URL — or just tell them to run
    `applace open <app>`, which opens whichever of them the app has.
-8. `deploy_app { app }` when they want an address rather than a dev server.
+9. `deploy_app { app }` when they want an address rather than a dev server.
 
 ## Rules that will save you a round trip
 
@@ -203,18 +206,37 @@ Four things follow from that, and they are all enforced rather than advised:
 `apis { app }` lists what the app may call. Use plain `api()` for a public API
 that needs no credential; the gateway is for the ones that do.
 
-## Looking at the page
+## The pages the gate opens
 
-`screenshot_app` returns a picture **and** a report. Read the report first:
+Every `write_files` ends in a real browser. The built app is served and each
+route is opened: a page that throws, or that paints nothing, is a **red write**
+that commits nothing, and the report carries the browser's own message with the
+line of your source that produced it. A green build and a working page are two
+different facts, and this is where the second one is checked.
 
-- `blank: true` — the page painted no text. Something threw before it rendered.
-- `errors` — the browser console. `TypeError: Cannot read properties of
-  undefined` with a file and a line is a real bug, and the line is real.
-- `failed_requests` — a 404 here is usually an API path that does not exist or
-  an asset that was never added.
+With nothing declared, the gate opens `/`. Tell it what else is the app:
 
-A green build with a blank page is a normal state, and it is the one thing only
-the browser can tell you. Check it before you say an app is finished.
+```
+add_route { app, path: "/customers", selector: "[data-testid='customers'] li",
+            text: "Acme", description: "The list everyone opens first" }
+```
+
+- `path` is a route on the app's own origin, nothing else: `/`, `/customers`,
+  `/orders/recent`. A URL is refused (`code: "invalid-route"`).
+- `selector` is a CSS selector that must match something on that page, and
+  `text` a string the page must contain. Both are optional and both are checked
+  on every write from then on — a change that quietly empties the list is red.
+- Declare the page, not the implementation. A selector on a `data-testid` you
+  put in the JSX survives restyling; one on `div > div > span` does not.
+- `routes { app }` lists them, `drop_route { app, path }` removes one. There is
+  no test file and no test framework: these are declarations, not code.
+
+If the report says the visit was `skipped`, read the reason. It means this
+machine has the check turned off — for a stack whose pages sit behind a login,
+or by policy — and **a skipped check is not a passed one**. `get_app` says the
+same thing under `visit`. Then look yourself: `screenshot_app` returns a picture
+**and** a report — `blank`, the console `errors`, and `failed_requests`, where a
+404 is usually an API path that does not exist or an asset never added.
 
 ## GitHub
 

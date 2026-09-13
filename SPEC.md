@@ -9,10 +9,11 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M13 are shipped** — the whole harness a developer drives, the
+> **Status: M1 to M14 are shipped** — the whole harness a developer drives, the
 > panel that puts it inside a chat window, which is where a company's users
-> actually are, and the gateway that lets an app read the company's own APIs
-> without a credential ever reaching the browser.
+> actually are, the gateway that lets an app read the company's own APIs without
+> a credential ever reaching the browser, and a gate that ends in a real browser
+> so a green build that paints a white screen is a red write.
 
 ## What v1 is
 
@@ -734,29 +735,61 @@ a company that tightens `policy.yaml` at noon has tightened it for the process
 already running, which is the difference between a rule and a rule that was
 true once.
 
-**M14 — The sensor.** The behavioural half of the gate, per D25.
+**M14 — The sensor.** *Shipped.* The behavioural half of the gate, per D25.
 
-1. **The routes.** Declared by the agent, defaulting to `/`, stored beside the
-   API declarations. Declared and never crawled: the gate runs on every write.
-2. **The visit.** After the production build, the bundle is served and each
-   route is opened in the browser M4 already drives — one browser per gate, not
-   one per route. An uncaught exception, an empty body or a console error is a
-   failure carrying the browser's own message, mapped to a file and a line
-   through the sourcemap when there is one.
+1. **The routes.** Declared by the agent — `add_route` / `ap.declare_route` /
+   `applace route add` — defaulting to `/`, stored beside the API declarations
+   and in no file of the app's tree (D1). Declared and never crawled: the gate
+   runs on every write, and an agent that says which pages are the app is
+   cheaper and clearer than a crawler guessing from the router.
+2. **The visit.** After the production build goes green, the bundle is served on
+   an ephemeral loopback port and each route is opened in the browser M4 already
+   drives — one browser per gate, one page per route. An uncaught exception, an
+   empty body or a console error is a red gate carrying the browser's own words,
+   mapped through the sourcemap to a line of the app's own source. The gate sets
+   `APPLACE_GATE=1` while it builds and the built-in stack turns sourcemaps on
+   when it sees it, so the map exists where it is read and nowhere that ships.
+   The server is the deployment minus the deploying: the same single-page rule,
+   plus `/api/gateway/*` proxied through the gateway's own handler, because an
+   app whose every API call 404s would be a sensor that only sees an error page.
 3. **The assertions.** Optional, per route, declarative: a selector that must be
    present, a string that must appear. No test framework enters the harness
-   (D10) and none is written into the app (D1).
-4. **The switch.** On by default, turned off per stack or per policy, because an
-   app whose routes require a login cannot be visited anonymously. Off is stated
-   in `get_app` rather than silently assumed, so nobody mistakes a skipped check
-   for a passed one.
+   (D10) and none is written into the app (D1) — an assertion is a row, and an
+   app that leaves Applace leaves with no trace of it.
+4. **The switch.** On by default, turned off per stack (`visit: false`) or per
+   policy (`gate: visit: false`), because an app whose routes require a login
+   cannot be visited anonymously. Off is stated — in the stage's own `reason`,
+   in `get_app`, in `applace route ls`, in the answer to `add_route` — rather
+   than silently assumed, so nobody mistakes a skipped check for a passed one.
 
-*Acceptance:* `scripts/m14_acceptance.sh` — an app that typechecks, lints and
-builds green while painting a white screen is refused by the gate, with the
-console error and the route named, and is not committed; the fix makes the same
-write green and it commits; a declared selector that a later write removes turns
-the gate red; a route behind a login with checks disabled is green and says in
-`get_app` that it was not visited; and no browser is left running afterwards.
+*Acceptance:* `scripts/m14_acceptance.sh` — an app on the real stack that
+typechecks, lints and builds green while rendering nothing is red at the `visit`
+stage and is not committed; a page that throws comes back with the browser's own
+`TypeError` and the line of `src/App.tsx` that produced it; the working page is
+green, committed, and reaches its declared API *during the visit* with the token
+the model never saw; a selector the page does not match turns the gate red and a
+URL is refused as a route; turning the check off in `policy.yaml` makes the same
+white screen green and says so in the report and in `get_app`; and the map the
+gate reads is in no file the deploy ships.
+
+What M14 learned. **The stage that is off has to be as legible as the stage that
+failed.** Every other stage of the gate answers ok/not ok; this one has a third
+answer — not looked at — and the whole design of the switch is about making that
+answer impossible to read as green. **A check nobody can turn off is a check
+that gets turned off by deleting it**: the two switches exist so that a company
+whose apps all sit behind a login keeps the other four stages. **The sourcemap
+is a build flag, and a build flag is a decision about what ships.** Turning it
+on unconditionally would publish every app's sources; it is on only for the
+build Applace itself runs, which is also the only build that reads it. **A
+console error and an uncaught exception arrive in different shapes** — `url:line`
+and `name (url:line:col)` — and the second one was silently unmappable until the
+acceptance script printed the wrong file. **Playwright counts lines from zero.**
+Converted once, at the edge, because a position that is one line short is worse
+than no position: it points confidently at the wrong code. And **the honest way
+to reuse a rule is to reuse its implementation**: the gate's own server inherits
+the gateway's handler and overrides one method — who may call — rather than
+keeping a second copy of the allowlist that would disagree the first time either
+was touched.
 
 **M15 — The take-over.** Per D26. `take` is the front ends that already exist;
 the older `adopt`, which points an Applace app at a GitHub repository that

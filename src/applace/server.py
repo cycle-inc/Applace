@@ -319,6 +319,49 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         """Stop allowing the app to call an API it no longer uses."""
         return applace.forget_api(app, name)
 
+    @server.tool()
+    def add_route(
+        app: str,
+        path: str,
+        selector: str | None = None,
+        text: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Tell the gate which page to open in a browser, and what it must show.
+
+        Every write already ends with a real browser opening the app's built
+        pages: an exception, a console error or an empty page is a red gate and
+        nothing is committed. With nothing declared that is `/` alone, so
+        declare the routes you build -- `/customers`, `/orders/new` -- as you
+        build them, or the gate will keep checking the home page while you work
+        on something else.
+
+        `selector` is a CSS selector that must match something on the page and
+        `text` is a string that must appear on it. Use them for the thing the
+        page exists to show -- `[data-testid="customers"]`, "Total" -- not for
+        wording somebody will reword. Nothing is written into the repository:
+        no test file, no framework, just this declaration.
+
+        `visited: false` in the response means this machine does not open
+        routes at all (no browser, or a policy that turns it off); the
+        declaration is kept either way.
+
+        On failure `code` is unknown-app or invalid-route.
+        """
+        return applace.declare_route(
+            app, path, selector=selector, text=text, description=description
+        )
+
+    @server.tool()
+    def routes(app: str) -> dict[str, Any]:
+        """The pages the gate opens on every write, and what each must show."""
+        return applace.routes(app)
+
+    @server.tool()
+    def drop_route(app: str, path: str) -> dict[str, Any]:
+        """Stop opening a route. Dropping the last one goes back to `/` alone."""
+        return applace.forget_route(app, path)
+
     # Sync: a deploy builds, and a provider build is minutes.
     @server.tool()
     def deploy_app(

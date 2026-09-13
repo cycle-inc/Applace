@@ -10,8 +10,15 @@ import tailwindcss from '@tailwindcss/vite'
 const gateway = process.env.APPLACE_GATEWAY
 const gatewayKey = process.env.APPLACE_GATEWAY_KEY ?? ''
 
+// The gate builds, then opens the result in a browser, and a console error out
+// of a minified chunk is unreadable. Applace sets this while it builds, so the
+// map exists exactly where it is read and nowhere else: a deploy builds without
+// it, and nothing published carries this app's sources.
+const forApplace = process.env.APPLACE_GATE === '1'
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: { sourcemap: forApplace },
   server: gateway
     ? {
         proxy: {

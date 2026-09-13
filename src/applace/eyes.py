@@ -35,6 +35,10 @@ NAVIGATION_TIMEOUT_MS = 20_000
 # After the network goes quiet, how long to let React finish painting.
 SETTLE_MS = 400
 
+# How much of a page's text to keep. Enough for any assertion a human would
+# write, and short of turning a report into a copy of the page.
+TEXT_LIMIT = 40_000
+
 INSTALL_HINT = (
     "The browser is not installed. Run `pip install 'applace[eyes]'` (or "
     "`uv sync --extra eyes`) and then `playwright install chromium`."
@@ -100,6 +104,19 @@ class FailedRequest:
         }
 
 
+@dataclass(frozen=True)
+class Stop:
+    """One page to open on a tour, and what to look for while standing there.
+
+    The selectors travel with the URL rather than being asked for afterwards
+    because the page is gone by then: a tour closes each page before opening the
+    next one, and querying a closed page is not a thing a browser can do.
+    """
+
+    url: str
+    selectors: tuple[str, ...] = ()
+
+
 @dataclass
 class Shot:
     url: str
@@ -110,6 +127,10 @@ class Shot:
     width: int = DEFAULT_WIDTH
     height: int = DEFAULT_HEIGHT
     text_length: int = 0
+    # What the page said, as a human would read it, and which of the selectors
+    # asked for were there. Both are filled on the page, while it still exists.
+    text: str = ""
+    present: dict[str, bool] = field(default_factory=dict)
 
     @property
     def errors(self) -> list[ConsoleMessage]:
@@ -127,7 +148,7 @@ class Shot:
 
     def report(self) -> dict[str, Any]:
         """Everything but the image -- what goes in the JSON half of the result."""
-        return {
+        out: dict[str, Any] = {
             "url": self.url,
             "title": self.title,
             "viewport": {"width": self.width, "height": self.height},
@@ -136,6 +157,9 @@ class Shot:
             "errors": [message.as_dict() for message in self.errors],
             "failed_requests": [request.as_dict() for request in self.failed_requests],
         }
+        if self.present:
+            out["present"] = dict(self.present)
+        return out
 
 
 def browser_path() -> str | None:
@@ -176,6 +200,27 @@ def capture(
     nothing is exactly what this is for, and the report says so. It raises only
     when there is no browser to look with, or when the page never loads at all.
     """
+    return tour([Stop(url)], width=width, height=height, full_page=full_page)[0]
+
+
+def tour(
+    stops: list[Stop],
+    *,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    screenshot: bool = True,
+    full_page: bool = False,
+) -> list[Shot]:
+    """Open several pages in *one* browser and report each of them.
+
+    One launch, because starting Chromium costs about as much as loading every
+    page after it, and the gate visits every declared route on every write (D25).
+    One *page* per stop, though: a console error belongs to the route that
+    produced it, and a shared tab would hand route B the mess route A made.
+
+    ``screenshot=False`` is the gate's way of saying it only wants the diagnosis.
+    A picture is for a human to look at; the gate reads the console.
+    """
     try:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -184,67 +229,117 @@ def capture(
         raise EyesUnavailable(INSTALL_HINT) from exc
 
     _hush()
-    console: list[ConsoleMessage] = []
-    failed: list[FailedRequest] = []
-
+    shots: list[Shot] = []
+    opening = stops[0].url if stops else ""
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             try:
-                page = browser.new_page(viewport={"width": width, "height": height})
-                page.set_default_timeout(NAVIGATION_TIMEOUT_MS)
-
-                page.on("console", lambda message: _record(console, message))
-                # An exception that escapes to the top is not a console message
-                # in Playwright's model, and it is the one an agent most needs.
-                page.on("pageerror", lambda error: _record_page_error(console, error))
-                page.on("requestfailed", lambda request: failed.append(
-                    FailedRequest(
-                        url=request.url,
-                        method=request.method,
-                        error=(request.failure or "the request failed"),
-                    )
-                ))
-                page.on("response", lambda response: _record_bad_status(failed, response))
-
-                try:
-                    page.goto(url, wait_until="networkidle")
-                except PlaywrightTimeout:
-                    # A page that never goes quiet is a finding, not a crash:
-                    # take the picture of whatever it managed to paint and say
-                    # what happened.
-                    console.append(
-                        ConsoleMessage(
-                            level="warning",
-                            text=f"the page was still busy after "
-                                 f"{NAVIGATION_TIMEOUT_MS // 1000}s; this is what it "
-                                 f"looked like at that point",
-                            source="applace",
+                for stop in stops:
+                    opening = stop.url
+                    shots.append(
+                        _one(
+                            browser,
+                            stop,
+                            width=width,
+                            height=height,
+                            screenshot=screenshot,
+                            full_page=full_page,
+                            timeout=PlaywrightTimeout,
                         )
                     )
-                page.wait_for_timeout(SETTLE_MS)
-
-                # innerText, not textContent: textContent counts the source of
-                # every inline <script> as text on the page, which would call a
-                # blank page with a script tag in it "rendered".
-                body = page.evaluate("document.body ? document.body.innerText : ''") or ""
-                return Shot(
-                    url=url,
-                    title=page.title(),
-                    png=page.screenshot(full_page=full_page),
-                    console=console,
-                    failed_requests=failed,
-                    width=width,
-                    height=height,
-                    text_length=len(body.strip()),
-                )
             finally:
                 browser.close()
     except PlaywrightError as exc:
         message = str(exc)
         if "Executable doesn't exist" in message or "playwright install" in message:
             raise EyesUnavailable(INSTALL_HINT) from exc
-        raise EyesUnavailable(f"the browser could not open {url}: {message}") from exc
+        raise EyesUnavailable(
+            f"the browser could not open {opening}: {message}"
+        ) from exc
+    return shots
+
+
+def _one(
+    browser: Any,
+    stop: Stop,
+    *,
+    width: int,
+    height: int,
+    screenshot: bool,
+    full_page: bool,
+    timeout: type[BaseException],
+) -> Shot:
+    """One page of a tour, opened and closed."""
+    console: list[ConsoleMessage] = []
+    failed: list[FailedRequest] = []
+    page = browser.new_page(viewport={"width": width, "height": height})
+    try:
+        page.set_default_timeout(NAVIGATION_TIMEOUT_MS)
+
+        page.on("console", lambda message: _record(console, message))
+        # An exception that escapes to the top is not a console message in
+        # Playwright's model, and it is the one an agent most needs.
+        page.on("pageerror", lambda error: _record_page_error(console, error))
+        page.on("requestfailed", lambda request: failed.append(
+            FailedRequest(
+                url=request.url,
+                method=request.method,
+                error=(request.failure or "the request failed"),
+            )
+        ))
+        page.on("response", lambda response: _record_bad_status(failed, response))
+
+        try:
+            page.goto(stop.url, wait_until="networkidle")
+        except timeout:
+            # A page that never goes quiet is a finding, not a crash: take the
+            # picture of whatever it managed to paint and say what happened.
+            console.append(
+                ConsoleMessage(
+                    level="warning",
+                    text=f"the page was still busy after "
+                         f"{NAVIGATION_TIMEOUT_MS // 1000}s; this is what it "
+                         f"looked like at that point",
+                    source="applace",
+                )
+            )
+        page.wait_for_timeout(SETTLE_MS)
+
+        # innerText, not textContent: textContent counts the source of every
+        # inline <script> as text on the page, which would call a blank page
+        # with a script tag in it "rendered".
+        body = page.evaluate("document.body ? document.body.innerText : ''") or ""
+        present = {
+            selector: _has(page, selector) for selector in stop.selectors
+        }
+        return Shot(
+            url=stop.url,
+            title=page.title(),
+            png=page.screenshot(full_page=full_page) if screenshot else b"",
+            console=console,
+            failed_requests=failed,
+            width=width,
+            height=height,
+            text_length=len(body.strip()),
+            text=body[:TEXT_LIMIT],
+            present=present,
+        )
+    finally:
+        page.close()
+
+
+def _has(page: Any, selector: str) -> bool:
+    """Is anything matching ``selector`` on the page?
+
+    A selector the browser cannot parse is False rather than an exception: the
+    agent wrote it, the agent gets told it did not match, and a gate that
+    crashes on a typo in an assertion would be worse than one that fails it.
+    """
+    try:
+        return page.query_selector(selector) is not None
+    except Exception:
+        return False
 
 
 def _record(console: list[ConsoleMessage], message: Any) -> None:
@@ -254,7 +349,12 @@ def _record(console: list[ConsoleMessage], message: Any) -> None:
     location = message.location or {}
     source = ""
     if location.get("url"):
-        source = f"{location['url']}:{location.get('lineNumber', 0)}"
+        # Playwright counts from zero and everything a human reads counts from
+        # one -- an editor, a stack trace, a sourcemap lookup. Converted here,
+        # once, so nothing downstream has to know which convention it holds.
+        line = int(location.get("lineNumber", 0)) + 1
+        column = int(location.get("columnNumber", 0)) + 1
+        source = f"{location['url']}:{line}:{column}"
     console.append(
         ConsoleMessage(level=_level(message.type), text=text, source=source)
     )

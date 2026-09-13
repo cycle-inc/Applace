@@ -58,6 +58,10 @@ class Stack:
     # means the stack has no gateway, and an app on it cannot declare an API --
     # which is a clear refusal rather than a call that silently has no token.
     gateway: str = ""
+    # Does the gate open this stack's build in a browser (D25)? A stack whose
+    # every route is behind a login cannot be visited anonymously, and saying so
+    # once here beats every app on it discovering it one red gate at a time.
+    visit: bool = True
     deploy: list[str] = field(default_factory=list)
     source: str = BUILTIN
     commit: str | None = None
@@ -75,6 +79,7 @@ class Stack:
             "entry": self.entry,
             "env_prefix": self.env_prefix,
             "gateway": self.gateway,
+            "visit": self.visit,
             "deploy": list(self.deploy),
             "source": self.source,
             # The commit a company stack is pinned at. An agent does not act on
@@ -181,6 +186,7 @@ def load(
         env_prefix=str(raw.get("env_prefix") or ""),
         entry=str(raw.get("entry") or ""),
         gateway=str(raw.get("gateway") or ""),
+        visit=raw.get("visit", True) is not False,
         deploy=[str(d) for d in deploy_raw],
         source=source,
         commit=commit,

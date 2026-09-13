@@ -16,7 +16,7 @@ import typer
 
 from . import deploy as deployment
 from . import env as env_store
-from . import apis, gate, gateway, policy, skill
+from . import apis, apps, gate, gateway, policy, skill
 from .api import Applace
 from .apps import (
     AppError,
@@ -56,6 +56,7 @@ from .naming import InvalidName
 from .paths import ApplacePaths, paths as applace_paths
 from .preview import PreviewError
 from .preview import tail as preview_tail
+from .sensor import RouteError
 from .server import serve as serve_server
 from .stacks import StackError
 from .stackstore import add as add_stack
@@ -586,6 +587,8 @@ def policy_command() -> None:
     typer.echo(f"  production    {rules.production_deploys}")
     hosts = ", ".join(rules.hosts) if rules.hosts else "any host an app declares"
     typer.echo(f"  apis          {hosts}")
+    looks = "every declared route, in a browser" if rules.visit else "off (gate: visit: false)"
+    typer.echo(f"  visit         {looks}")
 
 
 env_app = typer.Typer(
@@ -765,6 +768,99 @@ def api_gateway(
     typer.echo(f"{running.url}  (pid {running.pid})")
     typer.echo(f"  log  {running.log}")
     typer.echo(f"  key  {paths.env / gateway.KEY_NAME} (0600)")
+
+
+route_app = typer.Typer(
+    add_completion=False,
+    help="The pages the gate opens in a browser on every write (D25).",
+    no_args_is_help=True,
+)
+app.add_typer(route_app, name="route")
+
+
+@route_app.command("add")
+def route_add(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    path: Annotated[str, typer.Argument(help="The route, as the app's router spells it.")],
+    selector: Annotated[
+        str | None, typer.Option("--shows", help="A CSS selector the page must match.")
+    ] = None,
+    text: Annotated[
+        str | None, typer.Option("--says", help="Text the page must contain.")
+    ] = None,
+    description: Annotated[
+        str | None, typer.Option("--description", "-d", help="What this page is for.")
+    ] = None,
+) -> None:
+    """Declare a page the gate opens, and what it must find there."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        result = apps.declare_route(
+            paths,
+            conn,
+            name,
+            path=path,
+            selector=selector,
+            text=text,
+            description=description,
+        )
+    except (AppError, RouteError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"{result['app']} {result['path']}")
+    if result.get("note"):
+        typer.secho(f"  {result['note']}", fg=typer.colors.YELLOW)
+
+
+@route_app.command("ls")
+def route_list(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+) -> None:
+    """What the gate opens, what it looks for there, and whether it looks at all."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        state = apps.declared_routes(paths, conn, name)
+    except AppError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    if not state["on"]:
+        typer.secho(f"Not visited: {state['reason']}", fg=typer.colors.YELLOW)
+    for route in state["routes"]:
+        suffix = "" if state["declared"] else "   (the default, nothing declared)"
+        typer.echo(f"  {route['path']}{suffix}")
+        if route["selector"]:
+            typer.echo(f"    shows    {route['selector']}")
+        if route["text"]:
+            typer.echo(f"    says     {route['text']!r}")
+        if route["description"]:
+            typer.echo(f"    {route['description']}")
+
+
+@route_app.command("rm")
+def route_remove(
+    name: Annotated[str, typer.Argument(help="The app's slug.")],
+    path: Annotated[str, typer.Argument(help="The declared route to forget.")],
+) -> None:
+    """Stop opening a route. Forgetting the last one goes back to `/` alone."""
+    paths = _home()
+    _require_home(paths)
+    conn = connect(paths.db)
+    try:
+        removed = apps.forget_route(conn, name, path)["forgotten"]
+    except (AppError, RouteError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+    typer.echo(f"Removed {path} from {name}" if removed else f"{name} did not declare {path}.")
 
 
 github_app = typer.Typer(

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import apis, deploy, env, eyes, gateway, github, gitrepo, handover, policy
-from . import preview, shell
+from . import preview, sensor, shell
 from .db import Connection, find_app, insert_app, insert_snapshot, latest_gate, latest_snapshot
 from .db import list_apps as db_list_apps
 from .db import list_snapshots, unpushed
@@ -308,6 +308,8 @@ def app_detail(
     )
     detail["env"] = [variable.as_dict() for variable in declared]
     detail["env_missing"] = [variable.name for variable in env.missing(declared)]
+    # What the gate will open in a browser, and -- when it will not -- why (D25).
+    detail["visit"] = visiting(paths, conn, row)
     return detail
 
 
@@ -491,6 +493,78 @@ def declared_apis(conn: Connection, key: str) -> dict[str, Any]:
         "apis": [api.as_dict() for api in declared],
         "mount": apis.GATEWAY_PATH,
     }
+
+
+# -- declared routes (D25) --------------------------------------------------
+
+
+def declare_route(
+    paths: ApplacePaths, conn: Connection, key: str, **fields: Any
+) -> dict[str, Any]:
+    """`add_route`: record a page the gate opens, and what it must show (D25).
+
+    The agent's half of "it works": the gate can build anything, and only the
+    agent knows which routes are the app. What is stored is a path and, at most,
+    a selector and a string -- no test file enters the repository (D1) and no
+    test framework enters the harness (D10).
+    """
+    row = require_app(conn, key)
+    slug = str(row["slug"])
+    route = sensor.build(**fields)
+    sensor.declare(conn, app_id=str(row["id"]), route=route)
+    out: dict[str, Any] = {"app": slug, **route.as_dict()}
+    try:
+        stack = resolve(paths.stacks, str(row["stack"]))
+        rules = policy.load(paths)
+    except Exception:  # the stack or the policy is this machine's problem, not the route's
+        return out
+    off = sensor.off_because(stack, rules.visit)
+    if off:
+        # Stored anyway: the switch is about this machine, and a machine that
+        # has a browser tomorrow should not need the declaration written again.
+        out["visited"] = False
+        out["note"] = f"the route is recorded, but {off}."
+    else:
+        out["visited"] = True
+    return out
+
+
+def forget_route(conn: Connection, key: str, path: str) -> dict[str, Any]:
+    """Stop visiting a route. Forgetting the last one puts `/` back."""
+    row = require_app(conn, key)
+    removed = sensor.forget(conn, app_id=str(row["id"]), path=path)
+    return {"app": str(row["slug"]), "route": path, "forgotten": removed}
+
+
+def declared_routes(paths: ApplacePaths, conn: Connection, key: str) -> dict[str, Any]:
+    """Every route the gate opens on this app, and whether it opens any."""
+    row = require_app(conn, key)
+    return {"app": str(row["slug"]), **visiting(paths, conn, row)}
+
+
+def visiting(paths: ApplacePaths, conn: Connection, row: Any) -> dict[str, Any]:
+    """The state of the browser check for one app, as `get_app` reports it.
+
+    Says "off, because..." rather than saying nothing (D25): a check that
+    quietly did not run must never read like a check that passed.
+    """
+    routes = sensor.to_visit(conn, str(row["id"]))
+    state: dict[str, Any] = {
+        "routes": [route.as_dict() for route in routes],
+        "declared": len(sensor.declarations(conn, str(row["id"]))),
+    }
+    try:
+        stack = resolve(paths.stacks, str(row["stack"]))
+        rules = policy.load(paths)
+    except Exception as exc:
+        state["on"] = False
+        state["reason"] = str(exc)
+        return state
+    off = sensor.off_because(stack, rules.visit)
+    state["on"] = not off
+    if off:
+        state["reason"] = off
+    return state
 
 
 def screenshot(

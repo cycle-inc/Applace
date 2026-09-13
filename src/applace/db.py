@@ -153,6 +153,17 @@ MIGRATIONS: list[str] = [
         log_path   TEXT NOT NULL,
         started_at TEXT NOT NULL
     )""",
+    # v10 (M14): the routes the gate opens in a browser, and what each one must
+    # show (D25). Beside the API declarations rather than in the app's tree, for
+    # the same reason (D1): this is Applace's opinion about the app, not the
+    # app's own code, and an app that leaves the harness keeps building.
+    """CREATE TABLE IF NOT EXISTS routes (
+        app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+        path        TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (app_id, path)
+    )""",
 ]
 
 SCHEMA_VERSION = 1 + len(MIGRATIONS)
@@ -534,6 +545,36 @@ def list_apis(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
 def delete_api(conn: sqlite3.Connection, app_id: str, name: str) -> bool:
     cursor = conn.execute(
         "DELETE FROM api_decls WHERE app_id = ? AND name = ?", (app_id, name)
+    )
+    return cursor.rowcount > 0
+
+
+# -- declared routes (M14) --------------------------------------------------
+
+
+def declare_route(
+    conn: sqlite3.Connection, *, app_id: str, path: str, config: dict[str, Any]
+) -> None:
+    """Record a route the gate visits, replacing what that path said before."""
+    conn.execute(
+        """
+        INSERT INTO routes(app_id, path, config_json, created_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(app_id, path) DO UPDATE SET config_json = excluded.config_json
+        """,
+        (app_id, path, canonical_json(config), now_iso()),
+    )
+
+
+def list_routes(conn: sqlite3.Connection, app_id: str) -> list[sqlite3.Row]:
+    return list(
+        conn.execute("SELECT * FROM routes WHERE app_id = ? ORDER BY path", (app_id,))
+    )
+
+
+def delete_route(conn: sqlite3.Connection, app_id: str, path: str) -> bool:
+    cursor = conn.execute(
+        "DELETE FROM routes WHERE app_id = ? AND path = ?", (app_id, path)
     )
     return cursor.rowcount > 0
 

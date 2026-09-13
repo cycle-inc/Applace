@@ -15,7 +15,7 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any
 
-from . import github, policy, vercel
+from . import eyes, github, policy, vercel
 from .paths import ApplacePaths
 from .stacks import StackError, registry
 
@@ -39,6 +39,20 @@ def describe(paths: ApplacePaths) -> dict[str, Any]:
         out["warning"] = str(exc)
 
     out["github"] = _github(paths)
+
+    # Whether the last stage of the gate can run on this machine at all (D25).
+    # Said here rather than left to be inferred from a `skipped` an agent may
+    # only meet once it has already trusted a green write.
+    out["browser"] = {
+        "present": eyes.available(),
+        "note": (
+            "every write ends with the built app opened in a browser; declare "
+            "what each route must show with `add_route`"
+            if eyes.available()
+            else "this machine has no browser, so no write is ever opened and "
+            "checked. Nobody is looking at these pages but you."
+        ),
+    }
 
     production = policy.DEFAULT_RULE
     try:

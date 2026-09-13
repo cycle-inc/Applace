@@ -363,6 +363,61 @@ def test_env_ls_says_which_variables_are_still_missing(home: Home) -> None:
     assert "build only" in listed.output  # SERVER_ONLY has no TEST_ prefix
 
 
+def test_route_add_ls_and_rm_are_the_same_words_the_agent_uses(home: Home) -> None:
+    runner.invoke(app, ["new", "Route App", "--stack", "fake", "--no-install"])
+
+    default = runner.invoke(app, ["route", "ls", "route-app"])
+    assert default.exit_code == 0, default.output
+    assert "the default, nothing declared" in default.output
+
+    added = runner.invoke(
+        app,
+        [
+            "route", "add", "route-app", "customers",
+            "--shows", "table tbody tr",
+            "--says", "Nine",
+            "-d", "The list everyone opens first",
+        ],
+    )
+    assert added.exit_code == 0, added.output
+    assert "/customers" in added.output
+
+    listed = runner.invoke(app, ["route", "ls", "route-app"])
+    assert "/customers" in listed.output
+    assert "shows    table tbody tr" in listed.output
+    assert "says     'Nine'" in listed.output
+    assert "The list everyone opens first" in listed.output
+
+    removed = runner.invoke(app, ["route", "rm", "route-app", "/customers"])
+    assert "Removed /customers" in removed.output
+    assert "did not declare" in runner.invoke(
+        app, ["route", "rm", "route-app", "/customers"]
+    ).output
+
+
+def test_route_ls_says_when_nothing_is_opened_at_all(home: Home) -> None:
+    paths, _ = home
+    paths.policy.write_text("gate:\n  visit: false\n", encoding="utf-8")
+    runner.invoke(app, ["new", "Route App", "--stack", "fake", "--no-install"])
+    listed = runner.invoke(app, ["route", "ls", "route-app"])
+    assert "Not visited" in listed.output
+    assert "gate: visit: false" in listed.output
+
+
+def test_route_add_refuses_something_that_is_not_a_route(home: Home) -> None:
+    runner.invoke(app, ["new", "Route App", "--stack", "fake", "--no-install"])
+    result = runner.invoke(app, ["route", "add", "route-app", "https://example.com/x"])
+    assert result.exit_code == 1
+    assert "not a usable route" in result.output
+
+
+def test_policy_shows_whether_the_gate_opens_a_browser(home: Home) -> None:
+    paths, _ = home
+    assert "every declared route" in runner.invoke(app, ["policy"]).output
+    paths.policy.write_text("gate:\n  visit: false\n", encoding="utf-8")
+    assert "gate: visit: false" in runner.invoke(app, ["policy"]).output
+
+
 def test_env_rm_forgets_the_value_and_the_declaration(home: Home) -> None:
     paths, _ = home
     runner.invoke(app, ["new", "Env App", "--stack", "fake", "--no-install"])

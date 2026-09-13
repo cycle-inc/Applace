@@ -4,10 +4,15 @@
 whatever the agent just wrote, and it runs, in order:
 
     paths -> install (only if the manifest moved) -> typecheck -> lint -> build
+          -> visit
 
 It stops at the first red stage, because the ones after it would only report
 consequences of the same mistake. What comes back is the failing stage's own
 diagnostics, parsed to `{file, line, column, message}`.
+
+The last stage is the one the others cannot do: the build is served and every
+declared route is opened in a browser (D25). Four green stages and a white
+screen is a program, not an app, and until M14 that shipped.
 
 Green commits (D4). Red does not, and the files stay on disk: the agent needs to
 see its own broken code to fix it, and `get_app` says `dirty: true` with the
@@ -17,12 +22,13 @@ repository's history is a list of states that built, with nothing else in it.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import apis, diagnostics, env, files, gitrepo, handover, policy, shell
+from . import apis, diagnostics, env, files, gitrepo, handover, policy, sensor, shell
 from .apis import Reach
 from .apps import INSTALL_TIMEOUT, require_app
 from .db import Connection, insert_gate, insert_snapshot, unpushed
@@ -38,6 +44,18 @@ from .sync import PushReport, push_app
 # In order. `install` is conditional and the two middle stages are optional --
 # a stack that declares neither still gets a build, which is the real gate.
 PIPELINE = ("install", "typecheck", "lint", "build")
+
+# What runs after it, in this module rather than in a stack's commands: a stack
+# cannot be asked to own the browser, and a company that writes its own must not
+# have to remember to add the check that makes the gate worth having.
+VISIT = "visit"
+
+# Set for every stage the gate runs, and for nothing else. A stack that wants to
+# build differently when Applace is the one building reads it -- the built-in one
+# turns sourcemaps on, so a console error names a `.tsx` file and a line instead
+# of a minified chunk (D25). Vercel never sets it, so nothing shipped carries a
+# map: a debugging aid for the machine that built it is not something to publish.
+GATE_MARK = "APPLACE_GATE"
 
 STAGE_TIMEOUT = 600.0
 
@@ -79,6 +97,9 @@ class GateReport:
     # moved. Reported because it is a file in the app's history that no agent
     # asked for, and an unexplained commit is the thing D1 exists to avoid.
     generated: str = ""
+    # What the browser found at each declared route (D25). Empty when the visit
+    # was skipped, which the `stages` entry says in words.
+    visits: list[sensor.Visit] = field(default_factory=list)
     commit: str | None = None
     committed: bool = False
     dirty: bool = False
@@ -110,6 +131,8 @@ class GateReport:
             out["undeclared_calls"] = [reach.as_dict() for reach in self.reached]
         if self.generated:
             out["generated"] = self.generated
+        if self.visits:
+            out["visited"] = [visit.as_dict() for visit in self.visits]
         if self.push is not None:
             out["github"] = self.push.as_dict()
         if self.human is not None and self.human.touched:
@@ -207,6 +230,11 @@ def write_files(
         manifest_moved=before != after,
         environment=env.values_for(paths, slug),
     )
+    # Only after a green build: there is nothing to open otherwise, and a
+    # typecheck error reported twice -- once as itself, once as a blank page --
+    # is a worse report than the same error reported once (D25).
+    if report.ok:
+        _check_visit(paths, conn, report, row, root, stack)
     report.duration_ms = sum(stage.duration_ms for stage in report.stages)
 
     snapshot_id: str | None = None
@@ -376,6 +404,65 @@ def _write_function(root: Path, stack: Stack, declared: list[Any]) -> str:
     return apis.FUNCTION_PATH
 
 
+def _check_visit(
+    paths: ApplacePaths,
+    conn: Connection,
+    report: GateReport,
+    row: Any,
+    root: Path,
+    stack: Stack,
+) -> None:
+    """The D25 stage: the build is served and every declared route is opened.
+
+    Runs only on a green build, and turns it red when a route throws, renders
+    nothing, or does not show what it was declared to show. A skip is recorded
+    as a skip with its reason -- nobody may mistake "not looked at" for "looked
+    at and fine".
+    """
+    started = time.monotonic()
+    try:
+        rules = policy.load(paths)
+    except PolicyError as exc:  # pragma: no cover - the policy stage refused first
+        report.stages.append(
+            StageRun(VISIT, ok=True, duration_ms=0, skipped=True, reason=str(exc))
+        )
+        return
+
+    off = sensor.off_because(stack, rules.visit)
+    if off:
+        report.stages.append(
+            StageRun(VISIT, ok=True, duration_ms=0, skipped=True, reason=off)
+        )
+        return
+
+    routes = sensor.to_visit(conn, str(row["id"]))
+    outcome = sensor.run(
+        paths,
+        conn,
+        app_id=str(row["id"]),
+        slug=str(row["slug"]),
+        root=root,
+        dist=root / stack.dist,
+        routes=routes,
+    )
+    elapsed = int((time.monotonic() - started) * 1000)
+    report.visits = outcome.visits
+    if outcome.skipped:
+        report.stages.append(
+            StageRun(VISIT, ok=True, duration_ms=elapsed, skipped=True,
+                     reason=outcome.reason)
+        )
+        return
+    report.stages.append(StageRun(VISIT, ok=outcome.ok, duration_ms=elapsed))
+    if outcome.ok:
+        # `stage` is how far the gate got, and it got further than the build.
+        report.stage = VISIT
+        return
+    report.ok = False
+    report.stage = VISIT
+    report.errors = outcome.errors
+
+
 def _prune(directory: Path, root: Path) -> None:
     """Remove the directories a deleted generated file leaves behind."""
     while directory != root and directory.is_dir() and not any(directory.iterdir()):
@@ -413,7 +500,12 @@ def _run_pipeline(
         try:
             # The build needs the app's declared variables: a bundler inlines
             # them, so a build without them is a build of a different app (D8).
-            result = shell.run(command, cwd=root, env=environment, timeout=timeout)
+            result = shell.run(
+                command,
+                cwd=root,
+                env={**(environment or {}), GATE_MARK: "1"},
+                timeout=timeout,
+            )
         except CommandNotFound as exc:
             report.stage = name
             report.errors = [Diagnostic(message=str(exc))]

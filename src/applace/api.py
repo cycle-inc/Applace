@@ -57,6 +57,7 @@ from .paths import ApplacePaths
 from .paths import paths as default_paths
 from .policy import PolicyError
 from .preview import PreviewError
+from .sensor import RouteError
 from .stacks import StackError, registry
 from .stackstore import StackInstallError
 from .vercel import VercelError, VercelLink
@@ -71,6 +72,7 @@ CODES: tuple[tuple[type[Exception], str], ...] = (
     (InvalidName, "invalid-name"),
     (EnvError, "invalid-name"),
     (ApiError, "invalid-api"),
+    (RouteError, "invalid-route"),
     (StackInstallError, "stack-install-failed"),
     (StackError, "unknown-stack"),
     (PreviewError, "preview-failed"),
@@ -313,6 +315,47 @@ class Applace:
         """Every upstream this app declared, and the path its code fetches."""
         with self._session() as conn:
             return {"ok": True, **apps.declared_apis(conn, app)}
+
+    @answered
+    def declare_route(
+        self,
+        app: str,
+        path: str,
+        selector: str | None = None,
+        text: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a page the gate opens in a browser on every write (D25).
+
+        With nothing declared the gate opens `/`. Declaring more says which
+        pages are the app; `selector` and `text` say what each one must show,
+        and a write that stops showing it is red and is not committed.
+        """
+        with self._session() as conn:
+            return {
+                "ok": True,
+                **apps.declare_route(
+                    self.paths,
+                    conn,
+                    app,
+                    path=path,
+                    selector=selector,
+                    text=text,
+                    description=description,
+                ),
+            }
+
+    @answered
+    def forget_route(self, app: str, path: str) -> dict[str, Any]:
+        """Stop visiting a route. Forgetting the last one puts `/` back."""
+        with self._session() as conn:
+            return {"ok": True, **apps.forget_route(conn, app, path)}
+
+    @answered
+    def routes(self, app: str) -> dict[str, Any]:
+        """The routes the gate opens, and whether it opens any on this machine."""
+        with self._session() as conn:
+            return {"ok": True, **apps.declared_routes(self.paths, conn, app)}
 
     @answered
     def preview(self, app: str) -> dict[str, Any]:

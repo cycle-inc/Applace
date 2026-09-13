@@ -210,11 +210,21 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- the work ----------------------------------------------------------
 
+    def _authorised(self) -> bool:
+        """Is the caller this home? (D20)
+
+        A method rather than a line in `_handle` because the gate's own server
+        answers the same question differently -- it is serving a browser, and a
+        page's `fetch` cannot add a header nobody told it about -- and the
+        forwarding below must not be written twice to say so.
+        """
+        return secrets.compare_digest(self.headers.get(KEY_HEADER, ""), self.key)
+
     def _handle(self, method: str) -> None:
         if self.path == "/__health":
             self._say(200, {"ok": True})
             return
-        if not secrets.compare_digest(self.headers.get(KEY_HEADER, ""), self.key):
+        if not self._authorised():
             # Deliberately not "wrong key": this port is reachable by anything
             # on the machine, and telling it what it got wrong is a favour.
             self._say(403, {"ok": False, "error": "not for you"})

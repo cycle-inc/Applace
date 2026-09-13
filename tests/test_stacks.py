@@ -54,6 +54,22 @@ def test_resolve_defaults_and_reports_what_exists(paths: ApplacePaths) -> None:
     assert DEFAULT_STACK in str(exc.value)
 
 
+def test_a_stack_says_whether_its_pages_can_be_opened_at_all(tmp_path: Path) -> None:
+    """A stack whose every route sits behind a login opts out, once (D25)."""
+    (tmp_path / "stack.yaml").write_text(
+        "name: intranet\ncommands:\n  install: 'true'\n  dev: 'true'\n  build: 'true'\n"
+        "manifest: package.json\nvisit: false\n",
+        encoding="utf-8",
+    )
+    stack = load(tmp_path)
+    assert stack.visit is False
+    assert stack.summary()["visit"] is False
+
+
+def test_a_stack_that_says_nothing_about_it_gets_visited(paths: ApplacePaths) -> None:
+    assert registry(paths.stacks)[DEFAULT_STACK].visit is True
+
+
 def test_a_stack_missing_a_required_command_is_refused(tmp_path: Path) -> None:
     (tmp_path / "stack.yaml").write_text(
         "name: half\ncommands:\n  install: 'true'\n", encoding="utf-8"

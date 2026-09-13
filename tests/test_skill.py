@@ -32,7 +32,7 @@ def test_the_document_names_the_tools_it_tells_an_agent_to_call(home: Home) -> N
     tools = {tool.name for tool in asyncio.run(build_server(paths).list_tools())}
     for name in ("get_skill", "list_stacks", "create_app", "read_files",
                  "write_files", "screenshot_app", "set_env", "deploy_app",
-                 "rollback_app"):
+                 "rollback_app", "add_route", "routes", "drop_route"):
         assert name in tools, f"{name} is in SKILL.md but not a tool"
         assert name in text, f"{name} is a tool but not in SKILL.md"
 
@@ -43,6 +43,7 @@ def test_the_document_says_the_things_that_cost_a_round_trip() -> None:
     assert "Fix red before" in text       # D4's consequence for the agent
     assert "never see a value" in text or "never see the value" in text  # D8
     assert "diverged" in text             # D13
+    assert "skipped check is not a passed one" in text  # D25
 
 
 def test_describe_says_what_this_machine_does(home: Home, fake_github: FakeGitHub) -> None:

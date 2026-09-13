@@ -27,6 +27,9 @@ TOOLS = {
     "use_api",
     "apis",
     "drop_api",
+    "add_route",
+    "routes",
+    "drop_route",
     "list_stacks",
     "create_app",
     "list_apps",
@@ -198,6 +201,67 @@ def test_list_apps_and_get_app_agree_about_state(home: Home) -> None:
     after = call(server, "get_app", app="team-dashboard")
     assert after["dirty"] is True
     assert after["uncommitted"] == [" M manifest.json"]
+
+
+def test_routes_are_declared_listed_and_dropped_through_the_same_door(
+    home: Home,
+) -> None:
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+
+    added = call(
+        server,
+        "add_route",
+        app="team-dashboard",
+        path="customers",
+        selector="table tbody tr",
+        text="Nine",
+    )
+    assert added["ok"] is True
+    assert added["path"] == "/customers"
+
+    listed = call(server, "routes", app="team-dashboard")
+    assert [route["path"] for route in listed["routes"]] == ["/customers"]
+
+    detail = call(server, "get_app", app="team-dashboard")
+    assert detail["visit"]["declared"] == 1
+    assert [route["path"] for route in detail["visit"]["routes"]] == ["/customers"]
+
+    dropped = call(server, "drop_route", app="team-dashboard", path="/customers")
+    assert dropped["forgotten"] is True
+    # Nothing declared is not nothing visited: the front page is always opened.
+    assert [r["path"] for r in call(server, "routes", app="team-dashboard")["routes"]] == ["/"]
+
+
+def test_a_route_that_is_not_a_path_is_a_readable_result_not_a_refusal(
+    home: Home,
+) -> None:
+    """D22: fix your declaration, which is nothing like "a human must decide"."""
+    paths, _ = home
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+    result = call(server, "add_route", app="team-dashboard", path="https://example.com/x")
+    assert result["ok"] is False
+    assert result["code"] == "invalid-route"
+    assert call(server, "add_route", app="nope", path="/")["code"] == "unknown-app"
+
+
+def test_get_app_says_when_the_browser_check_is_off_rather_than_saying_nothing(
+    home: Home,
+) -> None:
+    paths, _ = home
+    paths.policy.write_text("gate:\n  visit: false\n", encoding="utf-8")
+    server = build_server(paths)
+    call(server, "create_app", name="Team Dashboard", stack="fake")
+
+    detail = call(server, "get_app", app="team-dashboard")
+    assert detail["visit"]["on"] is False
+    assert "gate: visit: false" in detail["visit"]["reason"]
+
+    added = call(server, "add_route", app="team-dashboard", path="/customers")
+    assert added["visited"] is False
+    assert "gate: visit: false" in added["note"]
 
 
 def test_get_app_on_an_unknown_app_is_a_readable_result(home: Home) -> None:

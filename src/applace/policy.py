@@ -18,6 +18,12 @@ as which dependencies may be installed -- so it is answered in the same file, th
 same way, with the same permissive default. A company that has an internal
 domain writes it down and the machine stops proxying anywhere else.
 
+**And one switch that is not a refusal (D25).** Whether the gate opens the build
+in a browser is a fact about the apps a company writes, not about what an agent
+is allowed to do -- an app whose every route is behind a login cannot be visited
+anonymously, and pretending otherwise would make every write red. It lives here
+because this is the file a company already edits.
+
 The file is optional and a broken one is loud: a policy that silently reads as
 "allow everything" because of a typo is worse than no policy at all.
 """
@@ -90,6 +96,10 @@ class Policy:
     # The hosts the gateway may proxy to (D24). Empty means any, and reported --
     # the same default as dependencies, for the same reason.
     hosts: tuple[str, ...] = ()
+    # Does the gate open the build in a browser (D25)? On, because a check that
+    # is off by default is a check nobody has. A company whose apps all sit
+    # behind a login turns it off here, in one place, for every app.
+    visit: bool = True
     source: Path | None = field(default=None, compare=False)
 
     @property
@@ -99,8 +109,8 @@ class Policy:
 
     @property
     def narrowed(self) -> bool:
-        """Does this policy refuse anything at all, dependencies or egress?"""
-        return self.restricted or bool(self.hosts)
+        """Does this policy say anything other than what Applace says by default?"""
+        return self.restricted or bool(self.hosts) or not self.visit
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +126,7 @@ class Policy:
                 "production_deploys": self.production_deploys,
             },
             "apis": {"hosts": list(self.hosts), "restricted": bool(self.hosts)},
+            "gate": {"visit": self.visit},
         }
 
     def summary(self) -> str:
@@ -131,6 +142,8 @@ class Policy:
             parts.append(f"dependencies must come from {self.registry}")
         if self.hosts:
             parts.append(f"APIs may only call {', '.join(self.hosts)}")
+        if not self.visit:
+            parts.append("the gate does not open the build in a browser")
         return "; ".join(parts)
 
     # -- the checks --------------------------------------------------------
@@ -232,6 +245,7 @@ def load(paths: ApplacePaths) -> Policy:
     dependencies = _section(path, raw, "dependencies")
     exposure = _section(path, raw, "exposure")
     api_section = _section(path, raw, "apis")
+    gate = _section(path, raw, "gate")
     return Policy(
         allow=_names(path, dependencies.get("allow")),
         deny=_names(path, dependencies.get("deny")),
@@ -239,6 +253,7 @@ def load(paths: ApplacePaths) -> Policy:
         public_repositories=_rule(path, exposure, "public_repositories"),
         production_deploys=_rule(path, exposure, "production_deploys"),
         hosts=_names(path, api_section.get("hosts")),
+        visit=_flag(path, gate, "visit"),
         source=path,
     )
 
@@ -263,6 +278,13 @@ def _registry(path: Path, value: Any) -> str | None:
         return None
     if not isinstance(value, str) or not urlparse(value).netloc:
         raise PolicyError(f"{path}: `registry` must be a URL, got {value!r}")
+    return value
+
+
+def _flag(path: Path, section: dict[str, Any], key: str) -> bool:
+    value = section.get(key, True)
+    if not isinstance(value, bool):
+        raise PolicyError(f"{path}: `{key}` must be true or false, got {value!r}")
     return value
 
 

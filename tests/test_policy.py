@@ -115,6 +115,27 @@ def test_a_policy_that_does_not_parse_is_loud(paths: ApplacePaths) -> None:
         policy.load(paths)
 
 
+def test_the_browser_check_is_on_until_a_company_turns_it_off(
+    paths: ApplacePaths,
+) -> None:
+    assert policy.DEFAULT.visit is True
+    assert policy.DEFAULT.narrowed is False
+
+    write_policy(paths, "gate:\n  visit: false\n")
+    rules = policy.load(paths)
+    assert rules.visit is False
+    assert rules.narrowed is True
+    assert "does not open the build in a browser" in rules.summary()
+    assert rules.as_dict()["gate"] == {"visit": False}
+
+
+def test_a_switch_that_is_not_true_or_false_is_loud(paths: ApplacePaths) -> None:
+    write_policy(paths, "gate:\n  visit: sometimes\n")
+    with pytest.raises(policy.PolicyError) as raised:
+        policy.load(paths)
+    assert "must be true or false" in str(raised.value)
+
+
 def test_an_empty_policy_file_is_the_default_policy(paths: ApplacePaths) -> None:
     write_policy(paths, "# nothing yet\n")
     rules = policy.load(paths)

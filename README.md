@@ -16,16 +16,18 @@ an *app* and serves it.
 - **Every app is an ordinary repository, on real GitHub, from birth.** Not an
   export at the end. `cd ~/.applace/apps/my-app && npm run dev` works, and
   nothing in the app knows Applace exists.
-- **The agent has eyes.** A build going green and a page rendering are two
-  different facts. Applace can report the second one — screenshot, browser
-  console, failed requests.
+- **The agent has eyes, and the gate uses them.** A build going green and a
+  page rendering are two different facts. Every write ends with the built app
+  opened in a real browser: a page that throws or paints nothing is a red write
+  that commits nothing, reported with the browser's own message and the line of
+  your source that produced it.
 - **A stack is company property.** The design system, the auth wiring and the
   internal API client live in a versioned stack, and every app starts from one.
   That is the difference between *a* Lovable and *our* Lovable.
 
 ### Status
 
-**M1 to M13 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M14 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -45,7 +47,9 @@ that refuse instead of queueing, and a collection that stops processes without
 deleting anybody's code), and the gateway (an app reads the company's own APIs
 through a proxy that holds the credential, in preview from a process Applace
 runs and in production from a serverless function committed to your repository,
-so nothing a browser downloads ever holds a token).
+so nothing a browser downloads ever holds a token), and the sensor (the gate
+ends in a browser: every declared route is opened, and a white screen under a
+green build is a red write).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -230,12 +234,40 @@ exposure:
   production_deploys: confirm
 apis:
   hosts: ["*.internal"]                 # which upstreams the gateway will proxy to
+gate:
+  visit: false                          # off only if your apps cannot be opened anonymously
 ```
 
 ```bash
 uv run applace policy       # what is in force
 uv run applace skill        # what an agent is told, and what this machine is
 ```
+
+### What the page must show
+
+The last stage of the gate is a browser. With nothing declared it opens `/`; an
+agent says what else is the app, and what each page has to show.
+
+```
+add_route { app, path: "/customers", selector: "[data-testid='customers'] li",
+            text: "Acme" }
+```
+
+From then on every write serves the real build, opens that route, and goes red
+if the page throws, renders nothing, or stops showing what was declared —
+nothing is committed, and the error names a line of `src/App.tsx` rather than of
+a minified chunk. The declarations live in the journal: no test file and no test
+framework enters your repository.
+
+```bash
+uv run applace route ls team-dashboard          # what gets opened, and what it must show
+uv run applace route add team-dashboard /orders --shows "table tbody tr"
+```
+
+An app whose every page is behind a login cannot be opened anonymously. Turn the
+check off for a stack (`visit: false` in `stack.yaml`) or for the machine (`gate:
+visit: false` in `policy.yaml`) — and it is then reported as skipped, with the
+reason, everywhere it would otherwise look green.
 
 ### Ship it
 
@@ -306,8 +338,8 @@ build step, no React version to agree on.
 
 Tools available today: `get_skill`, `list_stacks`, `create_app`, `list_apps`,
 `get_app`, `read_files`, `write_files`, `set_env`, `use_api`, `apis`,
-`drop_api`, `start_preview`, `stop_preview`, `screenshot_app`, `deploy_app`,
-`rollback_app`. `get_skill` is
+`drop_api`, `add_route`, `routes`, `drop_route`, `start_preview`,
+`stop_preview`, `screenshot_app`, `deploy_app`, `rollback_app`. `get_skill` is
 the one to call first: it returns the skill document plus what this particular
 machine does — which stacks it has, whether it pushes to GitHub, what the policy
 allows, and where it can deploy.
