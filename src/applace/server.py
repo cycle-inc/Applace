@@ -277,6 +277,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         methods: list[str] | None = None,
         header: str | None = None,
         description: str | None = None,
+        on_behalf_of: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Let the app call a company API, without the token reaching the browser.
 
@@ -290,6 +291,13 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
         credential -- never the credential. `paths` and `methods` are the
         allowlist: `["customers/**"]` and `["GET"]` mean exactly that, and the
         proxy refuses the rest. Declare the narrowest thing that works.
+
+        `on_behalf_of` is the other kind, and it is the one to use when the API
+        returns different data to different people. Instead of `token_env`, give
+        `{"url": "<your exchange endpoint>", "secret_env": "<NAME>"}`: every call
+        is then made as whoever is using the app, with a token your company
+        minted for them. Ask the human which of the two their API expects; do
+        not give both, and never try to send an identity yourself.
 
         `needs` in the response is the command for the human to run so the
         credential exists on their machine. Relay it; you will never see the
@@ -307,6 +315,7 @@ def build_server(paths: ApplacePaths | None = None) -> MCPServer:
             methods=methods,
             header=header,
             description=description,
+            on_behalf_of=on_behalf_of,
         )
 
     @server.tool()

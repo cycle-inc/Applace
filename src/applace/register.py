@@ -176,7 +176,8 @@ def audit(
     talking to itself.
 
     What is not here is as deliberate as what is. **No value of any secret**:
-    the journal has never held one (D8, D24) -- ``token_env`` is a variable's
+    the journal has never held one (D8, D24), and no exchanged token either
+    (D28) -- ``token_env`` is a variable's
     name, and the ``env/`` directory this module never opens is where a value
     lives. And **a refusal that never became a row is not a row**: a production
     deploy stopped by policy raises before anything is written, so what proves a
@@ -225,6 +226,12 @@ def audit(
                     "base_url": config.get("base_url"),
                     # A name, never a value -- this is the whole point of D24.
                     "token_env": config.get("token_env"),
+                    # Whether this upstream is reached as the app or as the
+                    # person using it, and where the identity is proved (D28).
+                    # The declaration, never the traffic: a row per proxied call
+                    # would be a request log with somebody's customers in it.
+                    "delegated": bool(config.get("on_behalf_of")),
+                    "exchange": (config.get("on_behalf_of") or {}).get("url"),
                     "paths": config.get("paths"),
                     "methods": config.get("methods"),
                 })

@@ -12,6 +12,16 @@ the credential -- and its own code only ever fetches a relative path under
   declaration and committed into the app's repository, which imports nothing
   from Applace and which a human can read, edit or delete (D1).
 
+A declaration names *one* of two credentials, never both (D28). `token_env` is
+the app's own: one value, the same for everybody who opens the app. That answers
+"may this app call billing" and cannot answer "may *this* accountant see *this*
+client's invoices". `on_behalf_of` is the other: no value of the app's at all,
+an **exchange** endpoint the company hosts, and a short-lived token minted for
+whoever is using the app. Both go out through the same two places above, from
+the same stored declaration -- which is why the exchange is an HTTP endpoint and
+not a Python hook: the generated function has to do it too, and it imports
+nothing.
+
 Two checks sit on top, and it matters which one is load-bearing. The **policy**
 decides which hosts this machine will proxy at all (D9's reasoning, applied to
 egress): that is a control, and it is enforced at the moment of the call. The
@@ -50,6 +60,26 @@ METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
 DEFAULT_HEADER = "Authorization"
 DEFAULT_SCHEME = "Bearer"
 
+# Where the *caller's* proof of identity arrives, on a delegated API (D28). The
+# same default as the credential going out, because in production the runtime in
+# front of the app has already put the session's bearer there and asking a
+# company to move it would be asking them to change their door for us.
+DEFAULT_ASSERTION_HEADER = "Authorization"
+
+# A header name, as HTTP defines a token. Checked because it is read back out of
+# the declaration to look a header up and to strip it before forwarding.
+HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+
+# How long before an exchanged token expires we stop reusing it, in seconds. A
+# token handed to an upstream one second before it dies is a 401 nobody can
+# reproduce.
+CLOCK_SKEW = 5.0
+
+# And the longest we will believe an `expires_in`. Not distrust of the company's
+# endpoint: a cache that holds a person's token for a week because a field was
+# mistyped is a cache that outlives their access, and D28 says nothing is kept.
+MAX_TOKEN_TTL = 3600.0
+
 # Hops that belong to one connection and must not be forwarded to the next one.
 HOP_BY_HOP = frozenset(
     {
@@ -82,6 +112,38 @@ class ApiError(Exception):
 
 
 @dataclass(frozen=True)
+class Exchange:
+    """Where a person's token comes from, for an API called on their behalf (D28).
+
+    Three names and no value: the URL Applace POSTs to, the **name** of the
+    variable holding the secret that authenticates Applace to it (D8), and the
+    request header the caller's assertion arrives in.
+    """
+
+    url: str
+    secret_env: str
+    assertion_header: str = DEFAULT_ASSERTION_HEADER
+
+    @property
+    def host(self) -> str:
+        return urlparse(self.url).netloc
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "secret_env": self.secret_env,
+            "assertion_header": self.assertion_header,
+        }
+
+    def config(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "secretEnv": self.secret_env,
+            "assertionHeader": self.assertion_header,
+        }
+
+
+@dataclass(frozen=True)
 class Api:
     """One upstream an app may reach, as declared and as stored."""
 
@@ -93,10 +155,16 @@ class Api:
     paths: tuple[str, ...] = ("**",)
     methods: tuple[str, ...] = ("GET",)
     description: str = ""
+    on_behalf_of: Exchange | None = None
 
     @property
     def host(self) -> str:
         return urlparse(self.base_url).netloc
+
+    @property
+    def delegated(self) -> bool:
+        """Is this API called as the person using the app, rather than as the app?"""
+        return self.on_behalf_of is not None
 
     @property
     def mount(self) -> str:
@@ -115,11 +183,13 @@ class Api:
             "methods": list(self.methods),
             "description": self.description,
             "fetch": f"{self.mount}/...",
+            "delegated": self.delegated,
+            "on_behalf_of": self.on_behalf_of.as_dict() if self.on_behalf_of else None,
         }
 
     def config(self) -> dict[str, Any]:
         """The same thing in the shape the gateway and the generated function read."""
-        return {
+        out: dict[str, Any] = {
             "base": self.base_url,
             "tokenEnv": self.token_env,
             "header": self.header,
@@ -127,6 +197,9 @@ class Api:
             "paths": list(self.paths),
             "methods": list(self.methods),
         }
+        if self.on_behalf_of is not None:
+            out["onBehalfOf"] = self.on_behalf_of.config()
+        return out
 
     # -- the control -------------------------------------------------------
 
@@ -200,6 +273,41 @@ def _matches(path: str, pattern: str) -> bool:
 # -- declaring -------------------------------------------------------------
 
 
+def build_exchange(raw: dict[str, Any]) -> Exchange:
+    """Validate an ``on_behalf_of`` block, or say exactly what is wrong (D28)."""
+    unknown = sorted(set(raw) - {"url", "secret_env", "assertion_header"})
+    if unknown:
+        raise ApiError(
+            f"on_behalf_of does not take {', '.join(unknown)}. It takes url, "
+            f"secret_env and optionally assertion_header."
+        )
+    url = str(raw.get("url") or "")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ApiError(
+            f"{url!r} is not a usable exchange URL. Give the scheme, the host "
+            f"and the path your company answers on: "
+            f"https://auth.internal/applace/token."
+        )
+    if parsed.query or parsed.fragment:
+        raise ApiError(
+            f"{url!r} carries a query string. Applace POSTs to the exchange; "
+            f"what it sends is in the body, not in the URL."
+        )
+    secret_env = str(raw.get("secret_env") or "")
+    if not secret_env:
+        raise ApiError(
+            "on_behalf_of needs secret_env: the *name* of the variable holding "
+            "the credential that authenticates Applace to the exchange (D8). A "
+            "human supplies the value with `applace env set`."
+        )
+    check_name(secret_env)
+    header = str(raw.get("assertion_header") or DEFAULT_ASSERTION_HEADER)
+    if not HEADER_NAME.match(header):
+        raise ApiError(f"{header!r} is not a usable header name.")
+    return Exchange(url=url, secret_env=secret_env, assertion_header=header)
+
+
 def build(
     *,
     name: str,
@@ -210,6 +318,7 @@ def build(
     paths: list[str] | None = None,
     methods: list[str] | None = None,
     description: str | None = None,
+    on_behalf_of: dict[str, Any] | None = None,
 ) -> Api:
     """Validate a declaration into an :class:`Api`, or say exactly what is wrong."""
     if not NAME.match(name):
@@ -230,6 +339,16 @@ def build(
         )
     if token_env:
         check_name(token_env)
+    if token_env and on_behalf_of:
+        # D28. An upstream reached with either credential depending on what the
+        # request happened to carry is an upstream that will one day be reached
+        # with the wrong one, and the wrong one here sees every partition.
+        raise ApiError(
+            f"{name} cannot have both token_env and on_behalf_of. It is called "
+            f"either as the app, with one credential for everybody, or as the "
+            f"person using it, with a token the exchange mints for them."
+        )
+    exchange = build_exchange(on_behalf_of) if on_behalf_of else None
 
     wanted = [m.upper() for m in (methods or ["GET"])]
     unknown = sorted(set(wanted) - set(METHODS))
@@ -253,6 +372,7 @@ def build(
         paths=tuple(paths or ["**"]),
         methods=tuple(dict.fromkeys(wanted)),
         description=" ".join((description or "").split()),
+        on_behalf_of=exchange,
     )
 
 
@@ -279,6 +399,7 @@ def declarations(conn: Connection, app_id: str) -> list[Api]:
 
 def from_row(row: Any) -> Api:
     raw = json.loads(str(row["config_json"]))
+    delegated = raw.get("on_behalf_of") or None
     return Api(
         name=str(row["name"]),
         base_url=str(raw.get("base_url", "")),
@@ -288,7 +409,36 @@ def from_row(row: Any) -> Api:
         paths=tuple(str(p) for p in raw.get("paths", ["**"])),
         methods=tuple(str(m) for m in raw.get("methods", ["GET"])),
         description=str(raw.get("description", "")),
+        # Read back, not re-validated: it was validated when it was declared,
+        # and a declaration that stopped loading because a rule tightened would
+        # take a working app off the air without anybody touching it.
+        on_behalf_of=(
+            Exchange(
+                url=str(delegated.get("url", "")),
+                secret_env=str(delegated.get("secret_env", "")),
+                assertion_header=str(
+                    delegated.get("assertion_header") or DEFAULT_ASSERTION_HEADER
+                ),
+            )
+            if delegated
+            else None
+        ),
     )
+
+
+def egress(api: Api) -> list[tuple[str, str]]:
+    """Every host reaching this API talks to, as (what it is called, host).
+
+    Two, for a delegated API: the upstream and the exchange. One list rather
+    than three copies of `if api.on_behalf_of`, because the policy is checked
+    when the declaration is made, when the gate runs and when the call is
+    forwarded, and a host that only two of those three knew about would be a
+    host a company thought it had blocked.
+    """
+    out = [(api.name, api.host)]
+    if api.on_behalf_of is not None:
+        out.append((f"{api.name}'s exchange", api.on_behalf_of.host))
+    return out
 
 
 def find(apis: list[Api], name: str) -> Api | None:
@@ -318,10 +468,91 @@ _FUNCTION = """\
 // It exists so the browser never holds a credential. The app fetches
 // {mount}/<api>/<path>; this adds the token, server-side, from the
 // environment variable named in the declaration.
+//
+// An API declared with `onBehalfOf` is called as the person using the app: the
+// assertion your own door put on the request is exchanged, here, for a token
+// that is theirs and short-lived. No assertion is a 401 and never this app's
+// own credential -- a request with nobody behind it has nobody to answer as.
+
+const APP = {app};
 
 const APIS = {config};
 
 const HOP_BY_HOP = new Set({hops});
+
+// Exchanged tokens, for as long as the exchange said they were good for. Module
+// scope, so a warm function reuses them and a cold one starts empty; nothing is
+// written anywhere, which is the rule (D28).
+const TOKENS = new Map();
+const SKEW_MS = {skew} * 1000;
+const MAX_TTL_MS = {max_ttl} * 1000;
+
+async function exchanged(name, api, assertion) {{
+  const exchange = api.onBehalfOf;
+  if (!assertion) {{
+    return {{
+      status: 401,
+      error:
+        `${{name}} is called on behalf of whoever is using this app, and this ` +
+        `request carried no ${{exchange.assertionHeader}} header. There is ` +
+        `nobody to call it as.`,
+    }};
+  }}
+  const secret = process.env[exchange.secretEnv];
+  if (!secret) {{
+    return {{ status: 503, error: `${{exchange.secretEnv}} is not set on this deployment` }};
+  }}
+
+  const key = `${{name}}\\u0000${{assertion}}`;
+  const now = Date.now();
+  const hit = TOKENS.get(key);
+  if (hit && hit.until > now) return {{ token: hit.token }};
+
+  let answer;
+  try {{
+    answer = await fetch(exchange.url, {{
+      method: 'POST',
+      headers: {{ 'content-type': 'application/json', authorization: `Bearer ${{secret}}` }},
+      body: JSON.stringify({{
+        app: APP,
+        api: name,
+        assertion,
+        asserted_by: 'runtime',
+      }}),
+    }});
+  }} catch {{
+    return {{ status: 502, error: `the exchange for ${{name}} did not answer` }};
+  }}
+
+  // Declared without a value and assigned in both branches: this file is linted
+  // by the same eslint as everything else in the repository, and a generated
+  // file that fails that lint is a file nobody can ship.
+  let payload;
+  try {{
+    payload = await answer.json();
+  }} catch {{
+    payload = {{}};
+  }}
+  if (!answer.ok) {{
+    // The status passes through; the body does not. An error body is written by
+    // somebody else and may repeat what was sent to it.
+    const said = typeof payload.error === 'string' ? `: ${{payload.error.slice(0, 200)}}` : '';
+    return {{
+      status: answer.status >= 400 && answer.status < 500 ? answer.status : 502,
+      error: `the exchange would not issue a token for ${{name}}${{said}}`,
+    }};
+  }}
+  if (typeof payload.token !== 'string' || !payload.token) {{
+    return {{ status: 502, error: `the exchange for ${{name}} answered without a token` }};
+  }}
+
+  const ttl = Number(payload.expires_in) * 1000;
+  if (Number.isFinite(ttl) && ttl > SKEW_MS) {{
+    for (const [old, entry] of TOKENS) if (entry.until <= now) TOKENS.delete(old);
+    TOKENS.set(key, {{ token: payload.token, until: now + Math.min(ttl, MAX_TTL_MS) - SKEW_MS }});
+  }}
+  return {{ token: payload.token }};
+}}
 
 function clean(segments) {{
   const out = [];
@@ -366,16 +597,31 @@ export default async function handler(request, response) {{
     return;
   }}
 
-  const token = api.tokenEnv ? process.env[api.tokenEnv] : '';
-  if (api.tokenEnv && !token) {{
-    response.status(503).json({{ error: `${{api.tokenEnv}} is not set on this deployment` }});
-    return;
+  // The one place a credential is chosen, and it is never both (D28).
+  let token = '';
+  const strip = new Set(HOP_BY_HOP);
+  if (api.onBehalfOf) {{
+    strip.add(api.onBehalfOf.assertionHeader.toLowerCase());
+    const carried = request.headers[api.onBehalfOf.assertionHeader.toLowerCase()];
+    const assertion = (Array.isArray(carried) ? carried[0] : carried) || '';
+    const got = await exchanged(name, api, assertion);
+    if (got.error) {{
+      response.status(got.status).json({{ error: got.error }});
+      return;
+    }}
+    token = got.token;
+  }} else if (api.tokenEnv) {{
+    token = process.env[api.tokenEnv] || '';
+    if (!token) {{
+      response.status(503).json({{ error: `${{api.tokenEnv}} is not set on this deployment` }});
+      return;
+    }}
   }}
 
   const query = request.url.includes('?') ? request.url.slice(request.url.indexOf('?')) : '';
   const headers = {{}};
   for (const [key, value] of Object.entries(request.headers)) {{
-    if (!HOP_BY_HOP.has(key.toLowerCase())) headers[key] = value;
+    if (!strip.has(key.toLowerCase())) headers[key] = value;
   }}
   if (token) headers[api.header] = api.scheme ? `${{api.scheme}} ${{token}}` : token;
 
@@ -406,17 +652,24 @@ export default async function handler(request, response) {{
 """
 
 
-def function_source(declared: list[Api]) -> str:
+def function_source(declared: list[Api], app: str = "") -> str:
     """The serverless function for these declarations, as a whole file.
 
     Whole file, never a patch: the only way this stays readable is if it is
     generated from one place and nothing ever merges into it.
+
+    ``app`` is baked in rather than read from the environment because the
+    exchange is told which app is asking, and an app that could name itself
+    could name another one.
     """
     config = {api.name: api.config() for api in sorted(declared, key=lambda a: a.name)}
     return _FUNCTION.format(
         mount=GATEWAY_PATH,
+        app=json.dumps(app),
         config=json.dumps(config, indent=2, sort_keys=True),
         hops=json.dumps(sorted(HOP_BY_HOP)),
+        skew=int(CLOCK_SKEW),
+        max_ttl=int(MAX_TOKEN_TTL),
     )
 
 
@@ -479,13 +732,17 @@ def _harmless(host: str) -> bool:
 __all__ = [
     "Api",
     "ApiError",
+    "DEFAULT_ASSERTION_HEADER",
+    "Exchange",
     "GATEWAY_PATH",
     "HOP_BY_HOP",
     "METHODS",
     "Reach",
     "build",
+    "build_exchange",
     "declarations",
     "declare",
+    "egress",
     "find",
     "from_row",
     "forget",

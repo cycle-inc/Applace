@@ -314,6 +314,7 @@ class Applace:
         header: str | None = None,
         scheme: str | None = None,
         description: str | None = None,
+        on_behalf_of: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record an upstream the app may call, and get the path to fetch (D24).
 
@@ -326,6 +327,14 @@ class Applace:
         `token_env` is the **name** of the variable holding the credential, not
         the credential (D8). `paths` and `methods` are the allowlist: anything
         outside them is refused by the gateway, not by convention.
+
+        `on_behalf_of` replaces `token_env` when the API must be called *as the
+        person using the app* rather than as the app (D28):
+        `{"url": ..., "secret_env": ..., "assertion_header": ...}` names the
+        endpoint your company hosts, which is handed the caller's assertion and
+        answers with a short-lived token for them. The two are mutually
+        exclusive, and a delegated call with nobody behind it is refused rather
+        than downgraded.
         """
         with self._session() as conn:
             return {
@@ -342,6 +351,7 @@ class Applace:
                     header=header,
                     scheme=scheme,
                     description=description,
+                    on_behalf_of=on_behalf_of,
                 ),
             }
 

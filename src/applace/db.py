@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,29 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def enable_wal(conn: sqlite3.Connection, patience: float = 10.0) -> None:
+    """Switch a database to WAL, waiting for whoever is switching it first.
+
+    Its own loop, because `busy_timeout` does not cover this one: SQLite does
+    not call the busy handler for `journal_mode`, so two processes opening the
+    same file in the same instant -- a gateway starting while an agent writes,
+    two people arriving at a chatbot at once -- had one of them raise "database
+    is locked" about a file that was perfectly fine. Reading the mode first
+    means the usual case, where it is already WAL, takes no lock at all.
+    """
+    if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+        return
+    deadline = time.monotonic() + patience
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """Open the database, creating and migrating the schema if needed."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,12 +216,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # A dev-server supervisor and an MCP tool answering a question are two
     # connections to one file, and under the default rollback journal the reader
     # blocks the writer. WAL lets them get on with it; `busy_timeout` says to
-    # wait for the write lock rather than raise "database is locked" -- and it
-    # is set before the switch to WAL, which is itself a write that needs an
-    # exclusive lock and will fail outright if this connection was never told
-    # to wait for one.
+    # wait for the write lock rather than raise "database is locked".
     conn.execute("PRAGMA busy_timeout = 10000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    enable_wal(conn)
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.execute(

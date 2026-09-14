@@ -432,42 +432,59 @@ def declare_api(
         )
     rules = policy.load(paths)
     api = apis.build(**fields)
-    refused = rules.refuse_api(api.name, api.host)
-    if refused:
-        raise policy.PolicyError(
-            f"{refused}. A human changes that in {paths.policy}."
+    # Both hosts, on a delegated API: where the data comes from and where the
+    # person's identity is proved. A company that allowlists egress means both.
+    for what, host in apis.egress(api):
+        refused = rules.refuse_api(what, host)
+        if refused:
+            raise policy.PolicyError(
+                f"{refused}. A human changes that in {paths.policy}."
+            )
+
+    # The one variable this declaration needs a human to answer: the app's own
+    # credential, or the secret that authenticates Applace to the exchange
+    # (D28). Never both -- `apis.build` refused that already.
+    secret_name = api.token_env
+    purpose = f"credential the gateway sends to {api.host} for {api.name}"
+    if api.on_behalf_of is not None:
+        secret_name = api.on_behalf_of.secret_env
+        purpose = (
+            f"authenticates Applace to {api.on_behalf_of.host}, which mints "
+            f"{api.name} tokens for whoever is using {slug}"
         )
-    if api.token_env and stack.env_prefix and api.token_env.startswith(stack.env_prefix):
+    if secret_name and stack.env_prefix and secret_name.startswith(stack.env_prefix):
         # The whole point of the gateway is that this value stays behind it, and
         # a name starting with the stack's prefix is a name the bundler inlines.
         raise apis.ApiError(
-            f"{api.token_env} starts with {stack.env_prefix}, which on the "
+            f"{secret_name} starts with {stack.env_prefix}, which on the "
             f"{stack.name} stack means the value is compiled into the bundle the "
             f"browser downloads. Name it without the prefix: "
-            f"{api.token_env[len(stack.env_prefix) :] or 'CRM_TOKEN'}."
+            f"{secret_name[len(stack.env_prefix) :] or 'CRM_TOKEN'}."
         )
 
     apis.declare(conn, app_id=str(row["id"]), api=api)
-    if api.token_env:
+    if secret_name:
         # Declared here too, so it shows up in `env` beside everything else a
         # human still has to answer. The gateway is the only reader of the value.
         env.declare(
-            conn,
-            app_id=str(row["id"]),
-            name=api.token_env,
-            description=f"credential the gateway sends to {api.host} for {api.name}",
+            conn, app_id=str(row["id"]), name=secret_name, description=purpose
         )
     declared = env.declarations(
         conn, paths, app_id=str(row["id"]), slug=slug, prefix=stack.env_prefix
     )
-    has_value = any(v.name == api.token_env and v.has_value for v in declared)
+    has_value = any(v.name == secret_name and v.has_value for v in declared)
     out: dict[str, Any] = {"app": slug, **api.as_dict(), "token_set": has_value}
-    if api.token_env and not has_value:
+    if api.on_behalf_of is not None:
+        out["calls_as"] = (
+            f"whoever is using {slug}; {api.name} carries no credential of this "
+            f"app's own, and a call with nobody behind it is refused."
+        )
+    if secret_name and not has_value:
         # Declared but unanswered is the normal state right after this call, and
         # the agent has to be able to say what a human should do about it (D8).
-        out["needs"] = env.instruction(slug, api.token_env)
+        out["needs"] = env.instruction(slug, secret_name)
         out["hint"] = (
-            f"the gateway refuses the call until {api.token_env} has a value; "
+            f"the gateway refuses the call until {secret_name} has a value; "
             f"ask the person you are talking to to run the command in `needs`."
         )
     return out

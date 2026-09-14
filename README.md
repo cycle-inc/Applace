@@ -27,7 +27,7 @@ an *app* and serves it.
 
 ### Status
 
-**M1 to M16 are shipped** — every milestone in the spec: the store (apps as git
+**M1 to M17 are shipped** — every milestone in the spec: the store (apps as git
 repositories), the compiler
 (`write_files` type-checks, lints and builds before anything counts, and commits
 when it is green), the preview (a supervised dev server with a URL), the eyes (a
@@ -53,7 +53,11 @@ green build is a red write), the take-over (`applace take` makes a front end
 that already exists into an app without writing a single byte into it), and the
 register (the developer who runs the machine sees every home's apps, every
 deploy with the human who confirmed it and what it all cost, through journals
-opened read-only and without opening a single app's files).
+opened read-only and without opening a single app's files), and the delegated
+call (an API that answers differently for each person is called *as* that
+person: the app declares an exchange instead of a token, and the gateway swaps
+the caller's session for a token minted for them, in preview and in production,
+keeping neither).
 [SPEC.md](SPEC.md) records why each of those is the way it is, and what each
 milestone taught.
 
@@ -263,6 +267,40 @@ apis:
 ```bash
 uv run applace api ls team-dashboard    # what it may call, and whether the token is set
 uv run applace api gateway              # the process holding the credentials
+```
+
+### When the API answers differently for each person
+
+One token for everybody is the wrong answer when the API is a ledger, a mailbox
+or a payroll. Declare an **exchange** instead — an endpoint your company hosts
+that turns whoever is calling into a token minted for them:
+
+```
+use_api { app, name: "billing", base_url: "https://billing.internal/v1",
+          on_behalf_of: { url: "https://auth.internal/applace/token",
+                          secret_env: "BILLING_EXCHANGE_SECRET" },
+          paths: ["invoices/**"], methods: ["GET"] }
+```
+
+The app's code does not change: it still fetches a relative path, and the
+identity is the page's. The gateway takes the session the browser already sent,
+POSTs `{app, api, assertion, asserted_by}` to your endpoint with the secret,
+sends upstream the token it gets back, and strips the session so the API never
+sees it. Tokens live in memory until `expires_in` and are written nowhere — not
+the journal, not the audit, not the log. In preview there is no session, so the
+subject is the home's own user id and `asserted_by` is `applace`, which your
+endpoint is free to refuse. The same branch is compiled into the serverless
+function committed to your repository, so preview and production are one
+mechanism rather than two that must be kept in step.
+
+Three rules follow, and the gate and the skill both state them: `token_env` and
+`on_behalf_of` are mutually exclusive, an app must never send an identity itself
+(a hand-built `Authorization` for a gateway call is discarded), and a delegated
+call with nobody behind it is a 401 — never the app's own credential.
+
+```bash
+uv run applace whoami --set alice@example.com   # whose home this is; once
+uv run applace api ls team-dashboard            # `as` and `exchange` for a delegated API
 ```
 
 ### The policy

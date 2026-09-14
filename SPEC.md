@@ -9,15 +9,17 @@
 > *app* and serves it. The two share their shape on purpose: a CLI, an MCP server, a
 > SKILL.md, a SQLite journal, decisions locked before code.
 >
-> **Status: M1 to M16 are shipped** — the whole harness a developer drives, the
+> **Status: M1 to M17 are shipped** — the whole harness a developer drives, the
 > panel that puts it inside a chat window, which is where a company's users
 > actually are, the gateway that lets an app read the company's own APIs without
 > a credential ever reaching the browser, a gate that ends in a real browser
 > so a green build that paints a white screen is a red write, a way in for
 > the front ends a company already has (`take` adopts a repository as it stands,
-> writing nothing into it), and the register: the person who runs the machine
+> writing nothing into it), the register: the person who runs the machine
 > can see every home's apps, every deploy and what it all cost, through journals
-> opened read-only.
+> opened read-only — and the delegated call: an app reads the company's API as
+> the person using it, from one declaration that compiles into both the preview
+> gateway and the function that ships, with no token ever written down.
 
 ## What v1 is
 
@@ -174,6 +176,7 @@ applace check <app>               # the D3 pipeline, by hand
 applace shot <app> [--route R]    # what the browser sees, and what it said (D5)
 applace open <app>                # the app in $EDITOR, the repo in a browser
 applace env set <app> <NAME>      # prompts for the value, never echoes it (D8)
+applace whoami [--set <id>]       # whose home this is, for a delegated call (D28)
 applace github connect --org O    # the D2b answer
 applace vercel connect [--team T] # the D12 answer
 applace deploy <app> [-t TARGET] [--production] [--commit SHA]
@@ -966,8 +969,9 @@ public internet. Nothing here adds a runtime to the app (D14) or an
 authentication to Applace (D11) — both would be the wrong answer to a real
 question, and the milestones below are what the right answer costs.
 
-**M17 — The delegated call.** Per D28 — the app calls the API as whoever is
-using it.
+**M17 — The delegated call.** *Shipped.* Per D28 — the app calls the API as
+whoever is using it. One declaration compiles into both halves, the preview
+gateway and the function that ships, and Applace keeps nothing of either.
 
 1. **The declaration.** `declare_api(app, name, base_url, on_behalf_of={...})`,
    mutually exclusive with `token_env`: an app's upstream is either a machine
@@ -1006,15 +1010,48 @@ Out of scope: Applace implementing OAuth, OIDC, SAML, a session or a token
 format. The exchange is an endpoint the company already needs; Applace calls it.
 
 *Acceptance:* `scripts/m17_acceptance.sh` — a fake exchange that returns a
-different token per subject and a fake upstream that echoes the token it was
-given. Two homes preview the same app and the upstream sees two different
-tokens, neither of which is in either journal. A call with no assertion is a 401
-carrying what is missing, and never the other home's token. A second call inside
-`expires_in` does not reach the exchange, and one after it does. The exchange
-secret and every exchanged token are absent from the journal, the audit, the
-gateway's log and the bundle. The generated function is run under node against
-the same two fakes and behaves identically to the preview gateway, which is the
-only way "one mechanism" is a fact. No model is called.
+different token per subject and checks the secret it is given, and a fake
+upstream that echoes the credential it was handed. Two homes are built in
+parallel, each by the real `create`/`write`/`declare_api`/`set_env` path, and
+each previews the same app through a really spawned gateway: the upstream sees
+two different tokens, and the exchange was asked twice, each time with a subject
+and `asserted_by=applace`. A request carrying carol's session is exchanged with
+`asserted_by=runtime` and the upstream never sees the session. A home nobody
+named is a 401 that says so, the exchange is not asked and the API is not
+called — never the other home's token. Three more calls inside `expires_in`
+reach the exchange zero times; a seven-second token is asked for again 2.5
+seconds after it lapses. The secret and all four minted tokens are absent from
+both gateways' logs, both journals, both repositories and builds, and
+`machine audit --json`, which still reports both upstreams as delegated and
+names the exchange. Then the committed `api/gateway/[name]/[...path].js` is run
+under node against the same two fakes and gives carol the same token the preview
+gateway gave her, 401s with no assertion, 403s an undeclared path and asks the
+exchange only once — which is the only way "one mechanism" is a fact. No model
+is called.
+
+What M17 learned. **One mechanism meant putting the exchange host where the
+policy already looks**, not next to it: `apis.egress()` is the single function
+that turns a declaration into the hosts it may reach, so declaring, gating and
+forwarding cannot disagree about whether the exchange is allowed — the same
+"one definition or none" M16 paid for. **The generated file is linted by the app
+it lands in**, and the first acceptance proved it: the exchange branch failed
+the stack's own eslint on an unused `error` binding and a useless initialiser, so
+every delegated app would have gone red on a file Applace wrote. A generated
+file is not exempt from the rules of the repository it is committed to.
+**`PRAGMA journal_mode = WAL` does not call SQLite's busy handler**, so the
+`busy_timeout` two comments claimed covered it never did; two homes created at
+once raced on the root ledger and one lost with "database is locked". The fix is
+`db.enable_wal()`, retrying the one statement that cannot wait for itself, used
+by both connect functions. **A home that does not know whose it is must say so,
+not guess**: the preview subject is the home's own id or there is no call, and
+`remember_whose` runs on every `Machine.user()` rather than only at creation,
+because homes made before this milestone exist and a hundred-byte read is
+cheaper than a migration. And **the source lint of item 5 was dropped on
+purpose.** No regex can tell an app's own legitimate `Authorization` header from
+one aimed at the gateway; the control that actually holds is the gateway and the
+generated function both setting that header themselves, so a hand-built one is
+discarded rather than detected. SKILL.md says this in a sentence, which is worth
+more than a rule that fires on the wrong files.
 
 **M18 — The catalogue.** Per D29 — one person's app becomes the team's.
 

@@ -25,6 +25,12 @@ gateway and read what their token can read. The key is a file in the home, mode
 **It refuses by default.** A call whose app, API, method or path was not
 declared is a 403 with the reason, not a pass-through. The declaration is the
 allowlist (D24), and this is the place where that sentence becomes true.
+
+A fourth thing arrived with M17. An API declared ``on_behalf_of`` is called as
+the *person* using the app (D28), so this process also talks to the company's
+exchange and holds, in memory, the short-lived tokens it gets back. It never
+falls back to the app's own credential -- there is none to fall back to -- and
+a call it cannot name a subject for is a 401.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -147,14 +154,23 @@ def resolve(
         rules = policy.load(paths)
     except policy.PolicyError as exc:
         return Refused(503, f"this machine's policy cannot be read: {exc}")
-    refused = rules.refuse_api(api.name, api.host)
-    if refused:
-        return Refused(403, refused)
+    for what, host in apis.egress(api):
+        refused = rules.refuse_api(what, host)
+        if refused:
+            return Refused(403, refused)
     return api
 
 
-def credential(paths: ApplacePaths, slug: str, api: Api) -> str | Refused:
-    """The value to send upstream. The only place in the gateway that reads one."""
+def credential(
+    paths: ApplacePaths, slug: str, api: Api, *, assertion: str = ""
+) -> str | Refused:
+    """The value to send upstream. The only place in the gateway that reads one.
+
+    One of two things, never both (D28): the app's own credential, or a token
+    the company's exchange just minted for the person making the call.
+    """
+    if api.on_behalf_of is not None:
+        return _delegated(paths, slug, api, assertion)
     if not api.token_env:
         return ""
     value = values_for(paths, slug).get(api.token_env, "")
@@ -165,6 +181,145 @@ def credential(paths: ApplacePaths, slug: str, api: Api) -> str | Refused:
             f"`applace env set {slug} {api.token_env}` (D8).",
         )
     return f"{api.scheme} {value}".strip() if api.scheme else value
+
+
+# -- calling as somebody (D28) ---------------------------------------------
+#
+# Exchanged tokens, for as long as the exchange said they were good for. A
+# dict and a lock rather than anything durable: D28 says nothing is kept, and
+# the reason is that a file of live tokens for named people is the worst thing
+# this harness could leave on a disk. Restarting the gateway empties it, which
+# costs one round trip per person and is the right trade.
+
+_TOKENS: dict[tuple[str, str, str], tuple[str, float]] = {}
+_TOKENS_LOCK = Lock()
+
+# How long to wait on the exchange. Shorter than the upstream: it is the
+# company's own endpoint on its own network, and a page waiting thirty seconds
+# to find out who it is has already failed.
+EXCHANGE_TIMEOUT = 10.0
+
+
+def _delegated(
+    paths: ApplacePaths, slug: str, api: Api, assertion: str
+) -> str | Refused:
+    """A token for whoever is making this call, from the company's exchange."""
+    exchange = api.on_behalf_of
+    assert exchange is not None  # the caller checked; this keeps the type honest
+
+    # The subject is never an argument (D28). In production it is whatever the
+    # runtime asserted and arrives on the request; in preview there is no
+    # session at all, so it is the home's own id, said to be Applace's word and
+    # not a door's -- which the company's endpoint is free to refuse.
+    if assertion:
+        payload = {"assertion": assertion, "asserted_by": "runtime"}
+        subject = assertion
+    else:
+        owner = machine.whose(paths)
+        if not owner:
+            return Refused(
+                401,
+                f"{api.name} is called on behalf of whoever is using the app, "
+                f"and this home does not know whose it is. A home made by "
+                f"Machine.user(id) knows; name this one with `applace whoami "
+                f"--set <id>`, or send a {exchange.assertion_header} header.",
+            )
+        payload = {"subject": owner, "asserted_by": "applace"}
+        subject = f"subject:{owner}"
+
+    now = time.monotonic()
+    key = (slug, api.name, subject)
+    with _TOKENS_LOCK:
+        held = _TOKENS.get(key)
+        if held is not None and held[1] > now:
+            return _sent_as(api, held[0])
+
+    secret = values_for(paths, slug).get(exchange.secret_env, "")
+    if not secret:
+        return Refused(
+            503,
+            f"{exchange.secret_env} has no value yet, so Applace cannot "
+            f"authenticate to {api.name}'s exchange. A human supplies it with "
+            f"`applace env set {slug} {exchange.secret_env}` (D8).",
+        )
+
+    got = _ask_exchange(exchange, api.name, slug, payload, secret)
+    if isinstance(got, Refused):
+        return got
+    token, expires_in = got
+
+    ttl = min(expires_in, apis.MAX_TOKEN_TTL) - apis.CLOCK_SKEW
+    if ttl > 0:
+        with _TOKENS_LOCK:
+            for stale in [k for k, (_, until) in _TOKENS.items() if until <= now]:
+                del _TOKENS[stale]
+            _TOKENS[key] = (token, now + ttl)
+    return _sent_as(api, token)
+
+
+def _sent_as(api: Api, token: str) -> str:
+    return f"{api.scheme} {token}".strip() if api.scheme else token
+
+
+def _ask_exchange(
+    exchange: apis.Exchange,
+    api_name: str,
+    slug: str,
+    payload: dict[str, str],
+    secret: str,
+) -> tuple[str, float] | Refused:
+    """POST to the company's endpoint and read one token out of the answer."""
+    body = json.dumps({"app": slug, "api": api_name, **payload}).encode("utf-8")
+    request = urllib.request.Request(
+        exchange.url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {secret}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=EXCHANGE_TIMEOUT) as answer:
+            raw = answer.read()
+    except urllib.error.HTTPError as exc:
+        # The status passes through -- a company that answers 403 for this
+        # person means 403, and turning it into a 502 would tell the app the
+        # wrong thing. The body does not: it was written by somebody else and
+        # may repeat what was sent to it.
+        said = _said(exc.read())
+        status = exc.code if 400 <= exc.code < 500 else 502
+        return Refused(
+            status,
+            f"{api_name}'s exchange would not issue a token ({exc.code})" + said,
+        )
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return Refused(502, f"{api_name}'s exchange did not answer: {exc}")
+
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return Refused(502, f"{api_name}'s exchange did not answer with JSON")
+    token = parsed.get("token") if isinstance(parsed, dict) else None
+    if not isinstance(token, str) or not token:
+        return Refused(502, f"{api_name}'s exchange answered without a token")
+    try:
+        expires_in = float(parsed.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0.0
+    return token, expires_in
+
+
+def _said(body: bytes) -> str:
+    """The exchange's own one-line reason, if it gave one and only that."""
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    reason = parsed.get("error") if isinstance(parsed, dict) else None
+    if not isinstance(reason, str) or not reason.strip():
+        return ""
+    return ": " + " ".join(reason.split())[:200]
 
 
 # -- the server ------------------------------------------------------------
@@ -247,7 +402,10 @@ class Handler(BaseHTTPRequestHandler):
             self._say(found.status, {"ok": False, "error": found.reason})
             return
 
-        token = credential(self.paths, slug, found)
+        assertion = ""
+        if found.on_behalf_of is not None:
+            assertion = self.headers.get(found.on_behalf_of.assertion_header, "")
+        token = credential(self.paths, slug, found, assertion=assertion)
         if isinstance(token, Refused):
             self._say(token.status, {"ok": False, "error": token.reason})
             return
@@ -265,8 +423,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # Case-insensitively, because the header arrives however the dev server's
         # proxy chose to spell it and the one thing that must never go upstream
-        # is the key that proves the caller is this home.
+        # is the key that proves the caller is this home. On a delegated API the
+        # caller's assertion goes the same way (D28): it was minted for the
+        # exchange, and the upstream is not the exchange.
         skip = HOP_BY_HOP | {KEY_HEADER.lower()}
+        if api.on_behalf_of is not None:
+            skip = skip | {api.on_behalf_of.assertion_header.lower()}
         headers = {
             name: value
             for name, value in self.headers.items()

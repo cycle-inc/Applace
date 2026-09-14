@@ -345,7 +345,8 @@ def _check_apis(
     forbidden = [
         reason
         for api in declared
-        if (reason := rules.refuse_api(api.name, api.host))
+        for what, host in apis.egress(api)
+        if (reason := rules.refuse_api(what, host))
     ]
     if forbidden:
         report.stage = "apis"
@@ -377,7 +378,7 @@ def _check_apis(
         report.stages.append(StageRun("apis", ok=False, duration_ms=0))
         return False
 
-    changed = _write_function(root, stack, declared)
+    changed = _write_function(root, stack, declared, str(row["slug"]))
     if changed:
         report.generated = changed
     report.stages.append(
@@ -390,7 +391,9 @@ def _check_apis(
     return True
 
 
-def _write_function(root: Path, stack: Stack, declared: list[Any]) -> str:
+def _write_function(
+    root: Path, stack: Stack, declared: list[Any], slug: str = ""
+) -> str:
     """Keep the generated function in step with the declarations.
 
     Returns the path it wrote or removed, or "" when nothing had to move. It is
@@ -410,7 +413,7 @@ def _write_function(root: Path, stack: Stack, declared: list[Any]) -> str:
         # under an app that already had declarations. Say nothing and write
         # nothing: the drift belongs to M8's report, not to this gate.
         return ""
-    wanted = apis.function_source(declared)
+    wanted = apis.function_source(declared, app=slug)
     if target.exists() and target.read_text(encoding="utf-8") == wanted:
         return ""
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -17,7 +17,7 @@ import typer
 
 from . import deploy as deployment
 from . import env as env_store
-from . import apis, apps, gate, gateway, policy, register, skill
+from . import apis, apps, gate, gateway, machine, policy, register, skill
 from .api import Applace
 from .apps import (
     AppError,
@@ -704,6 +704,46 @@ def policy_command() -> None:
     typer.echo(f"  visit         {looks}")
 
 
+@app.command("whoami")
+def whoami(
+    set_to: Annotated[
+        str | None,
+        typer.Option("--set", help="Name this home, once. It cannot change hands."),
+    ] = None,
+) -> None:
+    """Whose home this is — the id a delegated API is called on behalf of (D28).
+
+    A home made by `Machine.user(id)` already knows. Your own `~/.applace` was
+    made by you, so nothing named it, and an API declared `on_behalf_of` has
+    nobody to be previewed as until you say who you are here.
+    """
+    paths = _home()
+    _require_home(paths)
+    if set_to is None:
+        named = machine.whose(paths)
+        typer.echo(
+            named
+            if named
+            else "This home is nobody's in particular. "
+            "Name it with `applace whoami --set <your id>`."
+        )
+        return
+    try:
+        kept = machine.remember_whose(paths, set_to)
+    except machine.MachineError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    if kept != set_to:
+        typer.secho(
+            f"This home already belongs to {kept}, and a home does not change "
+            f"hands. Make a new one rather than renaming this one.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"This home is {kept}'s.")
+
+
 env_app = typer.Typer(
     add_completion=False,
     help="Values an app needs. Agents declare names; you supply values (D8).",
@@ -832,6 +872,15 @@ def api_list(
         if api.token_env:
             state = "set" if api.token_env in values else "MISSING"
             typer.echo(f"    token    {api.token_env} ({state}, sent as {api.header})")
+        if api.on_behalf_of is not None:
+            exchange = api.on_behalf_of
+            state = "set" if exchange.secret_env in values else "MISSING"
+            typer.echo("    as       whoever is using the app, not the app (D28)")
+            typer.echo(
+                f"    exchange {exchange.url} "
+                f"(secret ${exchange.secret_env}, {state})"
+            )
+            typer.echo(f"    proof    the caller's {exchange.assertion_header} header")
 
 
 @api_app.command("rm")
@@ -1723,10 +1772,12 @@ def _audit_line(event: dict[str, Any]) -> str:
         )
     if kind == "api":
         methods = ", ".join(event.get("methods") or []) or "any method"
-        return (
-            f"{event['name']} → {event['base_url']} ({methods}; "
-            f"credential from ${event['token_env']})"
+        how = (
+            f"as the caller, via {event['exchange']}"
+            if event.get("delegated")
+            else f"credential from ${event['token_env']}"
         )
+        return f"{event['name']} → {event['base_url']} ({methods}; {how})"
     if kind == "refused":
         return f"{event['stage']}: " + "; ".join(event.get("why") or [])
     if kind == "take":

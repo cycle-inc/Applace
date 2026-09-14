@@ -22,6 +22,7 @@ directory.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -36,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import register
-from .db import now_iso
+from .db import enable_wal, now_iso
 from .paths import ApplacePaths
 
 if TYPE_CHECKING:  # the Machine hands back an Applace; api.py imports this file
@@ -158,13 +159,11 @@ def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10.0)
     conn.row_factory = sqlite3.Row
-    # Several processes, one file: the same reasoning as the per-home database.
-    # `busy_timeout` comes first and it is not a style choice: switching to WAL
-    # takes an exclusive lock, and a connection that has not been told to wait
-    # raises "database is locked" the instant somebody else is opening the same
-    # ledger -- which is exactly what happens on a busy machine's first second.
+    # Several processes, one file: the same reasoning as the per-home database,
+    # and the same care about the switch to WAL, which takes an exclusive lock
+    # on a machine's first second -- when two people arrive at once.
     conn.execute("PRAGMA busy_timeout = 10000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    enable_wal(conn)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
@@ -361,6 +360,60 @@ def forget(ledger: Path, *, seconds: float = 7 * 24 * 3600.0) -> int:
         conn.close()
 
 
+# -- whose home this is ----------------------------------------------------
+#
+# Until M17 a home was anonymous: the root ledger knew which id each directory
+# belonged to, and the home itself knew nothing. That was enough while the only
+# thing a home did with an identity was live in its own directory. A delegated
+# call is not that (D28): previewing one means saying, to the company's own
+# exchange, *who* the call is for, and the gateway runs inside the home with no
+# ledger in reach. So the home keeps the answer, in the same `config.json` the
+# GitHub link lives in, and only `Machine.user()` ever writes it.
+
+WHOSE = "whose"
+
+
+def whose(paths: ApplacePaths) -> str:
+    """The user id this home belongs to, or "" for a home nobody named.
+
+    Empty is a real answer, not a failure: a developer's own `~/.applace` was
+    never created by a `Machine` and belongs to whoever is at the keyboard.
+    What depends on it says so rather than guessing.
+    """
+    try:
+        data = json.loads(paths.config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get(WHOSE) or "") if isinstance(data, dict) else ""
+
+
+def remember_whose(paths: ApplacePaths, user: str) -> str:
+    """Record whose home this is. Once: a home does not change hands.
+
+    Idempotent so `Machine.user()` can call it on every request, which is also
+    what gives a home made before M17 its id the next time its owner appears.
+    Refusing to overwrite is the control: nothing else in Applace may say that
+    somebody else's home is theirs.
+    """
+    if not user or not user.strip():
+        raise MachineError("a user id cannot be empty.")
+    data: dict[str, Any] = {}
+    if paths.config.exists():
+        try:
+            loaded = json.loads(paths.config.read_text(encoding="utf-8"))
+        except ValueError:
+            loaded = {}
+        if isinstance(loaded, dict):
+            data = loaded
+    already = str(data.get(WHOSE) or "")
+    if already:
+        return already
+    data[WHOSE] = user
+    paths.config.parent.mkdir(parents=True, exist_ok=True)
+    paths.config.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return user
+
+
 # -- the root --------------------------------------------------------------
 
 
@@ -432,6 +485,9 @@ class Machine:
         paths = self.home_of(user)
         first = not paths.db.exists()
         applace = Applace(paths, limits=self.limits)
+        # Every time, not only the first: a home made before M17 has no id in
+        # it, and the cost is one read of a hundred-byte file (D28).
+        remember_whose(paths, user)
         if first:
             conn = connect(self.ledger)
             try:

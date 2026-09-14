@@ -212,6 +212,42 @@ Four things follow from that, and they are all enforced rather than advised:
 `apis { app }` lists what the app may call. Use plain `api()` for a public API
 that needs no credential; the gateway is for the ones that do.
 
+### When the API answers differently for each person
+
+`token_env` is one credential for everybody who opens the app. That is right for
+an API where the app is the customer, and wrong for one where the *person* is —
+an accountant must not see another cabinet's clients because they opened the
+same page. For those, declare the exchange your company hosts instead of a
+token:
+
+```
+use_api {
+  app,
+  name: "billing",
+  base_url: "https://billing.internal/v1",
+  on_behalf_of: { url: "https://auth.internal/applace/token", secret_env: "EXCHANGE_SECRET" },
+  paths: ["invoices/**"],
+  methods: ["GET"],
+}
+```
+
+The app's code does not change: the same relative `fetch`, the same allowlist.
+What changes is who the call is made as — Applace hands the caller's identity to
+that endpoint and sends upstream the short-lived token it gets back.
+
+- **The two are mutually exclusive.** Declaring both is refused. Ask the human
+  which one their API expects if it is not obvious; "it returns different rows
+  for different people" means `on_behalf_of`.
+- **Never send an identity yourself.** Do not put a user id in the path, the
+  query or the body to say who is asking, and do not build an `Authorization`
+  header for a gateway call — the gateway sets that header itself, so yours is
+  discarded, and an app that can name the subject is an app that can name
+  somebody else. The identity comes from the page, not from your code.
+- **A call with nobody behind it is a 401**, never a fallback to some other
+  credential. Previewing works because the home knows whose it is; if the 401
+  says it does not, that is a sentence for the human, not something to route
+  around.
+
 ## The pages the gate opens
 
 Every `write_files` ends in a real browser. The built app is served and each
